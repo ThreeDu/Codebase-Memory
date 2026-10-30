@@ -1,3 +1,13 @@
 import chalk from "chalk";
 import { greet } from "./lib/index.js";
-console.log(chalk.green(greet("world")));
+
+export function run(name: string) {
+  return chalk.green(greet(name));
+}
+
+class App {
+  start() {
+    return run("world");
+  }
+}
+new App().start();

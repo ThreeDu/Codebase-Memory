@@ -2,23 +2,27 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
-import ts from "typescript";
 import { loadNotes } from "./notes.js";
+import { parsePy, parseTs, type Parsed } from "./parse.js";
 
 export const STORE = ".codemem";
-const CODE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs)$/;
+const VERSION = 3; // bump when parse output changes, so cached entries get re-parsed
+const CODE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py)$/;
+const PY = /\.py$/;
 const EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
-const SKIP = new Set(["node_modules", ".git", "dist", "build", STORE]);
-const TEST = /(\.|\/)(test|spec)\.[^/]+$|(^|\/)(__tests__|tests?)\//;
+const SKIP = new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", STORE]);
+const TEST = /(\.|\/)(test|spec)\.[^/]+$|(^|\/)(__tests__|tests?)\/|(^|\/)(test_[^/]*|[^/]*_test|conftest)\.py$/;
 
-export interface FileEntry {
+// specs/names/symbols are parse output, cached by hash; imports/external/uses are re-resolved every run
+// so new or deleted target files are picked up
+export interface FileEntry extends Parsed {
   hash: string;
-  specs: string[]; // raw import specifiers; re-resolved every run so new/deleted targets are picked up
   imports: string[]; // resolved repo-relative paths
   external: string[]; // package names
+  uses: Record<string, string[]>; // imported file -> names this file takes from it
 }
 export interface Index {
-  version: 1;
+  version: number;
   files: Record<string, FileEntry>;
 }
 
@@ -26,7 +30,7 @@ const storePath = (root: string, name: string) => join(root, STORE, name);
 
 export function loadIndex(root: string): Index {
   const p = storePath(root, "index.json");
-  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : { version: 1, files: {} };
+  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : { version: VERSION, files: {} };
 }
 
 /** Repo-relative posix paths of all files, respecting .gitignore when the root is a git repo. */
@@ -62,31 +66,58 @@ function resolve(from: string, spec: string, known: Set<string>): string | undef
 
 const packageName = (spec: string) => spec.split("/").slice(0, spec.startsWith("@") ? 2 : 1).join("/");
 
+const ancestors = (d: string): string[] => (d === "." ? [""] : [d, ...ancestors(posix.dirname(d))]);
+
+function resolvePy(from: string, spec: string, known: Set<string>): string | undefined {
+  const dots = spec.match(/^\.*/)![0].length;
+  const rest = spec.slice(dots).replace(/\./g, "/");
+  // absolute imports: like sys.path, try the file's own folder and each parent up to the root (a service folder is often
+  // its own source root, e.g. ml-service/app.py doing `from config import x`), then src/
+  const bases = dots
+    ? [posix.join(posix.dirname(from), ...Array(dots - 1).fill(".."), rest)]
+    : [...ancestors(posix.dirname(from)).map((d) => posix.join(d, rest)), `src/${rest}`];
+  return bases
+    .flatMap((b) => (rest ? [`${b}.py`, posix.join(b, "__init__.py")] : [posix.join(b, "__init__.py")]))
+    .find((c) => known.has(c));
+}
+
 /** Incrementally re-index: only files whose content hash changed are re-parsed. */
 export function update(root: string): { index: Index; parsed: number } {
   const old = loadIndex(root);
   const files = listFiles(root).filter((f) => CODE.test(f) && existsSync(join(root, f)));
   const known = new Set(files);
-  const index: Index = { version: 1, files: {} };
+  const index: Index = { version: VERSION, files: {} };
   let parsed = 0;
   for (const f of files) {
     const src = readFileSync(join(root, f), "utf8");
     const hash = createHash("sha1").update(src).digest("hex");
-    let specs = old.files[f]?.hash === hash ? old.files[f].specs : undefined;
-    if (!specs) {
-      specs = [...new Set(ts.preProcessFile(src, true, true).importedFiles.map((i) => i.fileName))];
+    const prev = old.files[f];
+    let p: Parsed | undefined = old.version === VERSION && prev?.hash === hash ? prev : undefined;
+    if (!p) {
+      p = PY.test(f) ? parsePy(src) : parseTs(f, src);
       parsed++;
     }
+    const py = PY.test(f);
     const imports = new Set<string>();
     const external = new Set<string>();
-    for (const s of specs) {
+    const uses: Record<string, string[]> = {};
+    const localTops = new Set<string>(); // namespace packages (no __init__.py) are local once any submodule resolves
+    for (const s of p.specs) {
       // shortcut: tsconfig "paths" aliases land in external; resolve them when a target repo needs it.
-      if (s.startsWith(".")) {
-        const r = resolve(f, s, known);
-        if (r) imports.add(r);
-      } else external.add(packageName(s));
+      const r = py ? resolvePy(f, s, known) : s.startsWith(".") ? resolve(f, s, known) : undefined;
+      const top = s.split(".")[0];
+      if (r) {
+        imports.add(r);
+        if (py) localTops.add(top);
+        for (const n of p.names[s] ?? []) if (!(uses[r] ??= []).includes(n)) uses[r].push(n);
+      }
+      // "pkg.func" won't resolve to a file; only call it external when the top-level package isn't local
+      else if (py && top && !resolvePy(f, top, known)) external.add(top);
+      else if (!py && !s.startsWith(".")) external.add(packageName(s));
     }
-    index.files[f] = { hash, specs, imports: [...imports].sort(), external: [...external].sort() };
+    for (const t of localTops) external.delete(t);
+    const { specs, names, symbols } = p;
+    index.files[f] = { hash, specs, names, symbols, imports: [...imports].sort(), external: [...external].sort(), uses };
   }
   mkdirSync(join(root, STORE), { recursive: true });
   writeFileSync(storePath(root, "index.json"), JSON.stringify(index, null, 1));
@@ -100,6 +131,28 @@ export function importersOf(index: Index): Map<string, string[]> {
     for (const i of e.imports) m.set(i, [...(m.get(i) ?? []), f]);
   return m;
 }
+
+/** The file that defines top-level `name` as seen from `file`: itself, or a local file it imports the name from,
+ * following re-exports (barrel index files, `export *`). Undefined for names from external packages. */
+export function definedIn(index: Index, file: string, name: string, depth = 0): string | undefined {
+  const e = index.files[file];
+  if (!e) return undefined;
+  if (e.symbols.some((s) => s.name === name && !s.parent)) return file;
+  if (depth > 5) return undefined;
+  for (const [target, names] of Object.entries(e.uses))
+    if (names.includes(name) || names.includes("*")) {
+      const found = definedIn(index, target, name, depth + 1);
+      if (found) return found;
+    }
+  return undefined;
+}
+
+/** A symbol's calls resolved to local files; names from external packages are dropped. */
+export const resolvedCalls = (index: Index, file: string, calls: string[] = []) =>
+  calls.flatMap((name) => {
+    const at = definedIn(index, file, name);
+    return at ? [{ name, file: at }] : [];
+  });
 
 /** package.json main/bin/exports targets, plus non-test source files nothing imports. */
 export function entryPoints(root: string, index: Index): string[] {
@@ -122,7 +175,8 @@ export function entryPoints(root: string, index: Index): string[] {
     }
   }
   const importers = importersOf(index);
-  for (const f of known) if (!importers.has(f) && !TEST.test(f)) found.add(f);
+  // __init__.py runs when its package is imported, never on its own
+  for (const f of known) if (!importers.has(f) && !TEST.test(f) && !f.endsWith("__init__.py")) found.add(f);
   return [...found].sort();
 }
 
@@ -157,6 +211,8 @@ export function renderMap(root: string, index = loadIndex(root)): string {
     const e = index.files[f];
     const deps = [...e.imports, ...e.external.map((x) => `pkg:${x}`)];
     lines.push(`- \`${f}\`${deps.length ? ` → ${deps.join(", ")}` : ""}`);
+    const defs = e.symbols.filter((s) => !s.parent && s.kind !== "const");
+    if (defs.length) lines.push(`  - defines: ${defs.map((s) => (s.kind === "class" ? `class ${s.name}` : s.name)).join(", ")}`);
   }
   return lines.join("\n") + "\n";
 }

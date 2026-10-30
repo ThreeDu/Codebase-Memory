@@ -3,13 +3,44 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { context } from "../src/context.js";
-import { entryPoints, update } from "../src/index.js";
+import { context, findSymbol } from "../src/context.js";
+import { writeGraph } from "../src/graph.js";
+import { definedIn, entryPoints, resolvedCalls, update } from "../src/index.js";
 import { addNote } from "../src/notes.js";
 
-// copy the fixture outside this git repo so the plain directory walk is used and nothing is written into the repo
-const root = mkdtempSync(join(tmpdir(), "codemem-"));
-cpSync(join(import.meta.dirname, "../../test/fixtures/sample"), root, { recursive: true });
+// copy fixtures outside this git repo so the plain directory walk is used and nothing is written into the repo
+const copyFixture = (name: string) => {
+  const dir = mkdtempSync(join(tmpdir(), "codemem-"));
+  cpSync(join(import.meta.dirname, "../../test/fixtures", name), dir, { recursive: true });
+  return dir;
+};
+const root = copyFixture("sample");
+
+test("builds the Python import graph", () => {
+  const py = copyFixture("pysample");
+  const { index } = update(py);
+  const main = index.files["app/main.py"];
+  // ".", ".models", "app.models" (multi-line parens), ".util"; "app.models.User" is a name, not a package
+  assert.deepEqual(main.imports, ["app/__init__.py", "app/models.py", "app/util.py"]);
+  assert.deepEqual(main.external, ["json", "os", "requests"]);
+  assert.deepEqual(index.files["run.py"].imports, ["app/main.py"]);
+  // service folder as its own source root: found from the importing file's folder, then its parents
+  assert.deepEqual(index.files["svc/app.py"].imports, ["svc/config.py", "svc/models/churn.py"]);
+  assert.deepEqual(index.files["svc/models/churn.py"].imports, ["svc/config.py"]);
+  assert.deepEqual(index.files["svc/app.py"].external, []);
+  // test_main.py imports nothing anyone else does, but is a test, so not an entry point
+  assert.deepEqual(entryPoints(py, index), ["run.py", "svc/app.py"]);
+
+  // symbols: module CONSTANTS, classes, methods (a nested def is not a method), and what each body uses
+  assert.deepEqual(index.files["svc/config.py"].symbols.map((s) => s.name), ["PORT", "DEBUG"]);
+  const churn = index.files["svc/models/churn.py"].symbols;
+  assert.deepEqual(churn.map((s) => [s.kind, s.name, s.parent]), [["class", "Model", undefined], ["method", "train", "Model"], ["method", "predict", "Model"]]);
+  assert.deepEqual(churn[1].calls, ["DEBUG", "PORT"]); // config.DEBUG via `import config`, PORT via from-import
+  assert.deepEqual(index.files["svc/app.py"].uses, { "svc/config.py": ["PORT"], "svc/models/churn.py": ["Model"] });
+  assert.deepEqual(index.files["svc/app.py"].symbols[0].calls, ["Model"]);
+  assert.equal(definedIn(index, "svc/app.py", "Model"), "svc/models/churn.py");
+  assert.match(findSymbol(py, "Model.train"), /method `Model.train` defined at `svc\/models\/churn.py:6`/);
+});
 
 test("builds the import graph", () => {
   const { index, parsed } = update(root);
@@ -18,6 +49,21 @@ test("builds the import graph", () => {
   assert.deepEqual(index.files["src/main.ts"].external, ["chalk"]);
   assert.deepEqual(index.files["src/lib/index.ts"].imports, ["src/lib/greet.ts"]); // extensionless
   assert.deepEqual(index.files["src/lib/greet.ts"].external, ["node:path"]);
+});
+
+test("reads TS symbols and what they use across files", () => {
+  const { index } = update(root);
+  const main = index.files["src/main.ts"];
+  assert.deepEqual(main.symbols.map((s) => [s.kind, s.name, s.parent ?? null, s.exported ?? false]), [
+    ["function", "run", null, true],
+    ["class", "App", null, false],
+    ["method", "start", "App", false],
+  ]);
+  assert.deepEqual(main.uses, { "src/lib/index.ts": ["greet"] });
+  assert.deepEqual(index.files["src/lib/index.ts"].uses, { "src/lib/greet.ts": ["*"] }); // export *
+  // greet is imported from the barrel but defined in greet.ts; chalk is an external package, so it's dropped
+  assert.deepEqual(resolvedCalls(index, "src/main.ts", main.symbols[0].calls), [{ name: "greet", file: "src/lib/greet.ts" }]);
+  assert.deepEqual(main.symbols[2].calls, ["run"]); // same-file call from a method
 });
 
 test("detects entry points", () => {
@@ -48,4 +94,44 @@ test("returns selective context with notes", () => {
   assert.match(context(root, "greet"), /`src\/lib\/greet.ts`/); // keyword match
   assert.match(context(root, "src/lib", 50), /truncated/);
   assert.throws(() => addNote(root, { kind: "idea", title: "x" }), /kind must be/);
+});
+
+test("reads CommonJS require and module.exports", () => {
+  const cjs = copyFixture("cjs");
+  const { index } = update(cjs);
+  assert.deepEqual(index.files["User.js"].symbols.map((s) => [s.name, s.kind, s.exported]), [["User", "const", true]]); // module.exports = User
+  const helpers = index.files["helpers.js"];
+  assert.deepEqual(helpers.uses, { "User.js": ["User"] });
+  const verify = helpers.symbols.find((s) => s.name === "verify")!;
+  assert.equal(verify.exported, true);
+  // User.findById -> User from User.js; jwt.verify is not our own verify; jwt is an external package
+  assert.deepEqual(resolvedCalls(index, "helpers.js", verify.calls), [
+    { name: "User", file: "User.js" },
+    { name: "getToken", file: "helpers.js" },
+  ]);
+  const controller = index.files["controller.js"];
+  assert.deepEqual(controller.uses, { "helpers.js": ["verify", "getToken"] }); // `getToken: token` keeps the exported name
+  assert.deepEqual(controller.symbols.map((s) => [s.name, s.kind, s.exported, s.calls]), [["login", "function", true, ["getToken", "verify"]]]);
+  // module.exports = mongoose.model(...) is named after the file, so `const Order = require("./Order")` finds it
+  assert.deepEqual(index.files["Order.js"].symbols.map((s) => [s.name, s.exported]), [["Order", true]]);
+  assert.deepEqual(resolvedCalls(index, "orders.js", index.files["orders.js"].symbols[0].calls), [{ name: "Order", file: "Order.js" }]);
+});
+
+test("finds where a symbol is defined and who uses it", () => {
+  update(root);
+  const out = findSymbol(root, "greet");
+  assert.match(out, /function `greet` defined at `src\/lib\/greet.ts:1`/);
+  assert.match(out, /used by `src\/main.ts` in: run/);
+  assert.match(context(root, "greet"), /## Symbols/);
+  assert.match(context(root, "src/main.ts"), /function `run` :4 \(exported\) → greet \(src\/lib\/greet.ts\)/);
+  assert.match(findSymbol(root, "nope"), /No function or class/);
+});
+
+test("writes the graph page with embedded data", () => {
+  addNote(root, { kind: "fix", title: "</script><b>xss", paths: ["src/main.ts"] });
+  const html = readFileSync(writeGraph(root), "utf8");
+  assert.match(html, /"path":"src\/main.ts"/);
+  assert.match(html, /"entry":true/);
+  // the note's "</script>" is escaped, so closing tags match the page's own opening tags
+  assert.equal(html.match(/<\/script>/g)?.length, html.match(/<script/g)?.length);
 });

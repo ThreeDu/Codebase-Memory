@@ -1,7 +1,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { context } from "./context.js";
+import { context, findSymbol } from "./context.js";
 import { renderMap, update, writeMap } from "./index.js";
 import { addNote, KINDS } from "./notes.js";
 
@@ -29,13 +29,22 @@ export async function serve(root: string): Promise<void> {
     "get_context",
     {
       description:
-        "Focused context for a task: notes (decisions, conventions, past fixes) and files with their imports/importers, for a file path, folder, or keyword.",
+        "Focused context for a task: notes (decisions, conventions, past fixes) and files with their functions/classes, what each calls, and imports/importers with the names used. Target is a file path, folder, symbol name, or keyword.",
       inputSchema: {
-        target: z.string().describe("File path, folder, or keyword, e.g. 'src/auth' or 'payment'"),
+        target: z.string().describe("File path, folder, symbol, or keyword, e.g. 'src/auth', 'useAuth' or 'payment'"),
         budget: z.number().int().positive().optional().describe("Max characters to return (default 8000)"),
       },
     },
     async ({ target, budget }) => text(context(root, target, budget)),
+  );
+
+  server.registerTool(
+    "find_symbol",
+    {
+      description: "Where a function or class is defined and which files and functions use it. Accepts 'name' or 'Class.method'.",
+      inputSchema: { name: z.string().min(1) },
+    },
+    async ({ name }) => text(findSymbol(root, name)),
   );
 
   server.registerTool(
