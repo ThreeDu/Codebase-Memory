@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
+import { watch } from "node:fs";
 import { resolve } from "node:path";
-import { context, findSymbol } from "./context.js";
+import { context, findSymbol, readSymbol } from "./context.js";
 import { writeGraph } from "./graph.js";
-import { renderMap, update, writeMap } from "./index.js";
+import { isSource, renderMap, update, writeMap } from "./index.js";
 import { serve } from "./mcp.js";
-import { addNote, KINDS, loadNotes } from "./notes.js";
+import { addNote, KINDS, loadNotes, removeNote, staleMark, updateNote } from "./notes.js";
 
 const USAGE = `codemem <command> [--root <dir>]
 
@@ -13,9 +14,13 @@ const USAGE = `codemem <command> [--root <dir>]
   map                                  print the project map
   context <file|folder|symbol|keyword> [--budget N]
   symbol <name|Class.method>           where it is defined and who uses it
+  read <name|Class.method>             print its source code
   note add --kind <${KINDS.join("|")}> [--paths a,b] "<title>" ["<body>"]
-  note list
+  note edit <id> [--kind K] [--title T] [--body B] [--paths a,b]
+  note rm <id>
+  note list                            ⚠ marks notes whose paths no longer exist
   graph [--no-open]                    write .codemem/graph.html and open it
+  watch                                keep map.md and graph.html updated as code changes
   mcp                                  run the MCP server on stdio`;
 
 // split "--name value" flags from positional args
@@ -39,12 +44,24 @@ try {
     console.log(context(root, rest[0], flags.budget ? Number(flags.budget) : undefined));
   } else if (cmd === "symbol" && rest[0]) {
     console.log(findSymbol(root, rest[0]));
+  } else if (cmd === "read" && rest[0]) {
+    console.log(readSymbol(root, rest[0]));
   } else if (cmd === "note" && rest[0] === "add") {
     const note = addNote(root, { kind: flags.kind, title: rest[1], body: rest[2], paths: flags.paths?.split(",") });
     writeMap(root);
     console.log(`Saved note #${note.id}.`);
+  } else if (cmd === "note" && rest[0] === "edit" && rest[1]) {
+    const { kind, title, body, paths } = flags;
+    const note = updateNote(root, Number(rest[1]), { kind, title, body, paths: paths?.split(",") });
+    writeMap(root);
+    console.log(`Updated note #${note.id}.`);
+  } else if (cmd === "note" && rest[0] === "rm" && rest[1]) {
+    removeNote(root, Number(rest[1]));
+    writeMap(root);
+    console.log(`Removed note #${rest[1]}.`);
   } else if (cmd === "note" && rest[0] === "list") {
-    for (const n of loadNotes(root)) console.log(`#${n.id} [${n.kind}] ${n.title}${n.paths.length ? ` (${n.paths.join(", ")})` : ""}`);
+    for (const n of loadNotes(root))
+      console.log(`#${n.id} [${n.kind}] ${n.title}${n.paths.length ? ` (${n.paths.join(", ")})` : ""}${staleMark(root, n)}`);
   } else if (cmd === "graph") {
     const file = writeGraph(root);
     console.log(`Wrote ${file}`);
@@ -52,6 +69,24 @@ try {
       const [bin, ...open] = process.platform === "win32" ? ["cmd", "/c", "start", ""] : [process.platform === "darwin" ? "open" : "xdg-open"];
       spawn(bin, [...open, file], { detached: true, stdio: "ignore" }).unref();
     }
+  } else if (cmd === "watch") {
+    const run = () => {
+      try {
+        writeGraph(root); // re-indexes, which also rewrites map.md
+        console.log(`${new Date().toLocaleTimeString()} updated map and graph`);
+      } catch (e) {
+        console.error(`codemem: ${(e as Error).message}`); // e.g. a file mid-save; the next change retries
+      }
+    };
+    run();
+    let timer: NodeJS.Timeout | undefined;
+    // debounced: one save often fires several events, and a branch switch fires hundreds
+    watch(root, { recursive: true }, (_, file) => {
+      if (!file || !isSource(file)) return;
+      clearTimeout(timer);
+      timer = setTimeout(run, 300);
+    });
+    console.log(`Watching ${root} (Ctrl+C to stop)`);
   } else if (cmd === "mcp") {
     await serve(root);
   } else {

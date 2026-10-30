@@ -56,9 +56,13 @@ Supported source files: TypeScript / JavaScript (`.ts .tsx .mts .cts .js .jsx .m
      map                                  print the project map
      context <file|folder|symbol|keyword> [--budget N]
      symbol <name|Class.method>           where it is defined and who uses it
+     read <name|Class.method>             print its source code
      note add --kind <decision|convention|fix> [--paths a,b] "<title>" ["<body>"]
-     note list
+     note edit <id> [--kind K] [--title T] [--body B] [--paths a,b]
+     note rm <id>
+     note list                            ⚠ marks notes whose paths no longer exist
      graph [--no-open]                    write .codemem/graph.html and open it
+     watch                                keep map.md and graph.html updated as code changes
      mcp                                  run the MCP server on stdio
    ```
 
@@ -186,6 +190,25 @@ codemem symbol ChurnPredictor.train
 
 For a class it also lists its methods. `used by ... in: run` names the functions that use it. Re-exports through barrel files (`index.ts`, `export *`) are followed, so you get the real definition, not the barrel.
 
+### `read <name>`: print just one function's code
+
+```bash
+codemem read greet
+codemem read ChurnPredictor.train
+```
+
+````markdown
+## `src/lib/greet.ts:2-4`
+
+```
+export function greet(name: string) {
+  return `Hello, ${name}`;
+}
+```
+````
+
+Prints only that function, class, or method with its file and line range, so you (or an agent) don't have to open the whole file. If several files define the same name, each one is printed.
+
 ### `note add`: remember a decision, convention, or fix
 
 ```bash
@@ -215,7 +238,20 @@ codemem note list
 
 ```
 #1 [decision] Barrel exports (src/lib)
+#2 [fix] Orphan kept on purpose (src/orphan.ts) ⚠ missing: src/orphan.ts
 ```
+
+`⚠ missing` means a file or folder the note is about was renamed or deleted, so the note may be out of date. The same mark shows in `map`, `context`, and the MCP tools. Fix the note or remove it:
+
+### `note edit` / `note rm`: correct or delete a note
+
+```bash
+codemem note edit 2 --paths src/main.ts --body "Moved into main.ts"
+codemem note edit 1 --kind convention
+codemem note rm 2
+```
+
+`edit` changes only the options you pass (`--kind`, `--title`, `--body`, `--paths`) and sets the note's date to today. The note's number is shown by `note list`, `map`, and `context`.
 
 ### `graph [--no-open]`: interactive picture of the codebase
 
@@ -244,6 +280,20 @@ In the graph:
 | Click empty space | Clears the highlight |
 | Scroll / drag | Zoom / pan |
 
+### `watch`: keep the map and graph up to date
+
+```bash
+codemem watch
+```
+
+```
+9:34:24 PM updated map and graph
+Watching E:\path\to\your-project (Ctrl+C to stop)
+9:34:25 PM updated map and graph
+```
+
+Leave it running in a terminal while you code. Every time a TS/JS or Python file is saved, created, or deleted, it re-indexes and rewrites `.codemem/map.md` and `.codemem/graph.html` (several saves within 0.3 s count as one). The open graph page doesn't reload itself: refresh the browser tab to see the change.
+
 ### `mcp`: run as an MCP server
 
 ```bash
@@ -259,7 +309,7 @@ You normally don't run this yourself. Your AI tool starts it; see the next secti
 Register it once for all your projects:
 
 ```bash
-claude mcp add -s user codemem -- node E:/code_save/project/Codebase-Memory/dist/src/cli.js mcp --root .
+claude mcp add -s user codemem -- node /path/to/Codebase-Memory/dist/src/cli.js mcp --root .
 ```
 
 Replace the path with where you installed Codebase Memory. `--root .` means "the project Claude Code is opened in". To register it for one project only, run the command inside that project without `-s user`.
@@ -273,7 +323,7 @@ Add this to the client's MCP configuration:
   "mcpServers": {
     "codemem": {
       "command": "node",
-      "args": ["E:/code_save/project/Codebase-Memory/dist/src/cli.js", "mcp", "--root", "E:/path/to/your-project"]
+      "args": ["/path/to/Codebase-Memory/dist/src/cli.js", "mcp", "--root", "/path/to/your-project"]
     }
   }
 }
@@ -285,11 +335,14 @@ Use an absolute `--root` unless you know the client starts servers inside the pr
 
 | Tool | Input | Returns |
 |---|---|---|
-| `reindex` | none | Updates the memory; reports how many files were re-parsed |
+| `reindex` | none | Updates the memory; reports how many files were re-parsed. Rarely needed: the tools below re-index changed files before answering |
 | `get_map` | none | The project overview (same as `codemem map`) |
 | `get_context` | `target`, optional `budget` | Same as `codemem context` |
 | `find_symbol` | `name` (`name` or `Class.method`) | Same as `codemem symbol` |
+| `read_symbol` | `name` (`name` or `Class.method`) | Same as `codemem read` |
 | `add_note` | `kind`, `title`, optional `body`, `paths` | Saves a note |
+| `update_note` | `id`, optional `kind`, `title`, `body`, `paths` | Same as `codemem note edit` |
+| `remove_note` | `id` | Same as `codemem note rm` |
 
 ### Tell the agent to use it
 
@@ -299,8 +352,9 @@ Add this to the project's `CLAUDE.md` or `AGENTS.md`:
 ## Codebase memory
 - Before working on an area, call `get_context` for the file, folder, or function you are about to change.
 - To find where something is defined or who uses it, call `find_symbol` instead of searching.
-- After editing code, call `reindex`.
+- To read a function, call `read_symbol` instead of opening the whole file.
 - When you make an architecture decision, establish a convention, or fix a non-obvious bug, record it with `add_note` (attach the paths).
+- If a note is marked `⚠ missing` or no longer true, fix it with `update_note` or delete it with `remove_note`.
 ```
 
 Agents that can't use MCP can read `.codemem/map.md` directly.
@@ -322,7 +376,7 @@ All files are plain JSON/Markdown and safe to delete. `codemem index` rebuilds e
 
 1. **First time in a project**: `codemem index`, then `codemem graph` to get the big picture.
 2. **Before changing something**: `codemem context <file or folder>`, or `codemem symbol <name>` to see who will be affected.
-3. **After changing code**: `codemem index` (agents: `reindex`).
+3. **After changing code**: nothing to do; `context`, `symbol`, `read` and the MCP tools re-index changed files first. Run `codemem index` before committing so `.codemem/` is current.
 4. **When you learn something worth keeping**: `codemem note add ...`.
 5. **Commit `.codemem/`** with your code so teammates and agents share the same memory.
 

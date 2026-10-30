@@ -2,11 +2,11 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
-import { loadNotes } from "./notes.js";
+import { loadNotes, staleMark } from "./notes.js";
 import { parsePy, parseTs, type Parsed } from "./parse.js";
 
 export const STORE = ".codemem";
-const VERSION = 3; // bump when parse output changes, so cached entries get re-parsed
+const VERSION = 4; // bump when parse output changes, so cached entries get re-parsed
 const CODE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py)$/;
 const PY = /\.py$/;
 const EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
@@ -27,6 +27,9 @@ export interface Index {
 }
 
 const storePath = (root: string, name: string) => join(root, STORE, name);
+
+/** Whether a changed path (as fs.watch reports it, any separator) is a source file the index covers. */
+export const isSource = (f: string) => CODE.test(f) && !f.split(/[\\/]/).some((part) => SKIP.has(part));
 
 export function loadIndex(root: string): Index {
   const p = storePath(root, "index.json");
@@ -200,7 +203,8 @@ export function renderMap(root: string, index = loadIndex(root)): string {
   ];
   if (notes.length) {
     lines.push("", "## Notes");
-    for (const n of notes) lines.push(`- [${n.kind}] ${n.title}${n.paths.length ? ` (${n.paths.join(", ")})` : ""}`);
+    for (const n of notes)
+      lines.push(`- #${n.id} [${n.kind}] ${n.title}${n.paths.length ? ` (${n.paths.join(", ")})` : ""}${staleMark(root, n)}`);
   }
   lines.push("", "## Modules");
   let dir: string | undefined;

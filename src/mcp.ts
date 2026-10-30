@@ -1,9 +1,9 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { context, findSymbol } from "./context.js";
+import { context, findSymbol, readSymbol } from "./context.js";
 import { renderMap, update, writeMap } from "./index.js";
-import { addNote, KINDS } from "./notes.js";
+import { addNote, KINDS, removeNote, updateNote } from "./notes.js";
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
@@ -12,7 +12,10 @@ export async function serve(root: string): Promise<void> {
 
   server.registerTool(
     "reindex",
-    { description: "Update the codebase memory after files changed. Incremental: only changed files are re-parsed." },
+    {
+      description:
+        "Re-index the codebase memory now. Rarely needed: the other tools re-index changed files before answering.",
+    },
     async () => {
       const { index, parsed } = update(root);
       return text(`Indexed ${Object.keys(index.files).length} files (${parsed} re-parsed).`);
@@ -22,7 +25,7 @@ export async function serve(root: string): Promise<void> {
   server.registerTool(
     "get_map",
     { description: "Project overview: entry points, most depended-on modules, notes, and every module with its imports." },
-    async () => text(renderMap(root)),
+    async () => text(renderMap(root, update(root).index)),
   );
 
   server.registerTool(
@@ -48,6 +51,16 @@ export async function serve(root: string): Promise<void> {
   );
 
   server.registerTool(
+    "read_symbol",
+    {
+      description:
+        "Source code of one function, class or method, with its file and line range. Read this instead of the whole file. Accepts 'name' or 'Class.method'.",
+      inputSchema: { name: z.string().min(1) },
+    },
+    async ({ name }) => text(readSymbol(root, name)),
+  );
+
+  server.registerTool(
     "add_note",
     {
       description:
@@ -63,6 +76,39 @@ export async function serve(root: string): Promise<void> {
       const note = addNote(root, input);
       writeMap(root);
       return text(`Saved note #${note.id}.`);
+    },
+  );
+
+  server.registerTool(
+    "update_note",
+    {
+      description:
+        "Correct an existing note (its #id is shown in get_map and get_context). Only the fields you pass change. Use it when a note marked ⚠ missing points at renamed files, or the decision changed.",
+      inputSchema: {
+        id: z.number().int(),
+        kind: z.enum(KINDS).optional(),
+        title: z.string().min(1).optional(),
+        body: z.string().optional(),
+        paths: z.array(z.string()).optional(),
+      },
+    },
+    async ({ id, ...change }) => {
+      const note = updateNote(root, id, change);
+      writeMap(root);
+      return text(`Updated note #${note.id}.`);
+    },
+  );
+
+  server.registerTool(
+    "remove_note",
+    {
+      description: "Delete a note that is no longer true (e.g. the code it describes was removed).",
+      inputSchema: { id: z.number().int() },
+    },
+    async ({ id }) => {
+      removeNote(root, id);
+      writeMap(root);
+      return text(`Removed note #${id}.`);
     },
   );
 

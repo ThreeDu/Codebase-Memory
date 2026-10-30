@@ -4,6 +4,7 @@ export interface Sym {
   name: string;
   kind: "function" | "class" | "method" | "const" | "type";
   line: number;
+  end?: number; // last line of the definition
   exported?: boolean;
   parent?: string; // class name, for methods
   calls?: string[]; // imported names (as exported by their module) and same-file top-level names used in the body
@@ -28,6 +29,7 @@ export function parseTs(file: string, src: string): Parsed {
   const symbols: Sym[] = [];
   const bodies: [Sym, ts.Node][] = [];
   const line = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  const at = (n: ts.Node) => ({ line: line(n), end: sf.getLineAndCharacterOfPosition(n.getEnd()).line + 1 });
   const exported = (n: ts.Node) =>
     ts.canHaveModifiers(n) && !!ts.getModifiers(n)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
   const isFn = (n?: ts.Node) => !!n && (ts.isArrowFunction(n) || ts.isFunctionExpression(n));
@@ -46,7 +48,7 @@ export function parseTs(file: string, src: string): Parsed {
     const s: Sym = {
       name: file.split("/").pop()!.replace(/\.[^.]+$/, ""),
       kind: ts.isClassExpression(value) ? "class" : isFn(value) ? "function" : "const",
-      line: line(st),
+      ...at(st),
       exported: true,
     };
     symbols.push(s);
@@ -68,7 +70,7 @@ export function parseTs(file: string, src: string): Parsed {
     } else if (/^(module\.)?exports\.\w+$/.test(target) && ts.isPropertyAccessExpression(left)) {
       if (ts.isIdentifier(right)) cjsExported.add(right.text);
       else {
-        const s: Sym = { name: left.name.text, kind: isFn(right) ? "function" : "const", line: line(st), exported: true };
+        const s: Sym = { name: left.name.text, kind: isFn(right) ? "function" : "const", ...at(st), exported: true };
         symbols.push(s);
         bodies.push([s, right]);
       }
@@ -100,17 +102,17 @@ export function parseTs(file: string, src: string): Parsed {
         for (const e of st.exportClause.elements) pushUnique(names, spec, (e.propertyName ?? e.name).text);
       else pushUnique(names, spec, "*");
     } else if (ts.isFunctionDeclaration(st) && st.name) {
-      const s: Sym = { name: st.name.text, kind: "function", line: line(st), exported: exported(st) || cjsExported.has(st.name.text) };
+      const s: Sym = { name: st.name.text, kind: "function", ...at(st), exported: exported(st) || cjsExported.has(st.name.text) };
       symbols.push(s);
       bodies.push([s, st]);
     } else if (ts.isClassDeclaration(st) && st.name) {
       const cls = st.name.text;
-      symbols.push({ name: cls, kind: "class", line: line(st), exported: exported(st) || cjsExported.has(cls) });
+      symbols.push({ name: cls, kind: "class", ...at(st), exported: exported(st) || cjsExported.has(cls) });
       for (const m of st.members) {
         const isMethod =
           ts.isMethodDeclaration(m) || ts.isConstructorDeclaration(m) || (ts.isPropertyDeclaration(m) && isFn(m.initializer));
         if (!isMethod) continue;
-        const s: Sym = { name: m.name ? m.name.getText(sf) : "constructor", kind: "method", line: line(m), parent: cls };
+        const s: Sym = { name: m.name ? m.name.getText(sf) : "constructor", kind: "method", ...at(m), parent: cls };
         symbols.push(s);
         bodies.push([s, m]);
       }
@@ -136,12 +138,12 @@ export function parseTs(file: string, src: string): Parsed {
         const fn = isFn(d.initializer);
         const isExported = exported(st) || cjsExported.has(d.name.text);
         if (!fn && !isExported) continue; // plain local constants are noise
-        const s: Sym = { name: d.name.text, kind: fn ? "function" : "const", line: line(d), exported: isExported };
+        const s: Sym = { name: d.name.text, kind: fn ? "function" : "const", ...at(d), exported: isExported };
         symbols.push(s);
         if (d.initializer) bodies.push([s, d.initializer]);
       }
     } else if (ts.isInterfaceDeclaration(st) || ts.isTypeAliasDeclaration(st) || ts.isEnumDeclaration(st)) {
-      symbols.push({ name: st.name.text, kind: "type", line: line(st), exported: exported(st) });
+      symbols.push({ name: st.name.text, kind: "type", ...at(st), exported: exported(st) });
     }
   }
 
@@ -210,7 +212,7 @@ export function parsePy(src: string): Parsed {
       const s: Sym = { name: def[3], kind: def[2] === "class" ? "class" : "function", line: i + 1 };
       symbols.push(s);
       if (def[2] === "class") cls = { name: def[3], indent: 0 };
-      else bodies.push([s, i, 0]);
+      bodies.push([s, i, 0]);
     } else if (def && cls && def[2] === "def" && indent === (cls.inner ??= indent)) {
       const s: Sym = { name: def[3], kind: "method", line: i + 1, parent: cls.name };
       symbols.push(s);
@@ -225,6 +227,9 @@ export function parsePy(src: string): Parsed {
   for (const [s, start, indent] of bodies) {
     let end = start + 1;
     while (end < lines.length && (lines[end].search(/\S/) < 0 || lines[end].search(/\S/) > indent)) end++;
+    while (end > start + 1 && !lines[end - 1].trim()) end--; // trailing blank lines aren't part of it
+    s.end = end;
+    if (s.kind === "class") continue; // its methods carry the calls
     const body = lines.slice(start + 1, end).join("\n");
     const calls = new Set<string>();
     for (const [, ns, attr] of body.matchAll(/\b(\w+)\.(\w+)/g)) if (namespaces.has(ns) && !local.has(attr)) calls.add(attr);

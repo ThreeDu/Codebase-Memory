@@ -30,9 +30,13 @@ node dist/src/cli.js index path/to/repo
 | `map` | Print the project map |
 | `context <file\|folder\|symbol\|keyword> [--budget N]` | Focused context, cut at N chars (default 8000) |
 | `symbol <name\|Class.method>` | Where a function/class is defined and which files and functions use it |
+| `read <name\|Class.method>` | Print just that function/class/method's source, with its line range |
 | `note add --kind decision\|convention\|fix [--paths a,b] "<title>" ["<body>"]` | Save a note |
-| `note list` | List notes |
+| `note edit <id> [--kind K] [--title T] [--body B] [--paths a,b]` | Change only the given fields of a note |
+| `note rm <id>` | Delete a note |
+| `note list` | List notes; `⚠ missing` marks notes whose files/folders were renamed or deleted |
 | `graph [--no-open]` | Re-index, write `.codemem/graph.html`, and open it in the browser |
+| `watch` | Keep `map.md` and `graph.html` updated as code changes (refresh the browser to see it) |
 | `mcp` | Run as an MCP server on stdio |
 
 All commands accept `--root <dir>` (default: the current directory). After `npm link` you can call the CLI as `codemem`.
@@ -44,12 +48,14 @@ All commands accept `--root <dir>` (default: the current directory). After `npm 
 ## Use from Claude Code (MCP)
 
 ```bash
-claude mcp add codemem -- node E:/code_save/project/Codebase-Memory/dist/src/cli.js mcp --root .
+claude mcp add codemem -- node /path/to/Codebase-Memory/dist/src/cli.js mcp --root .
 ```
 
-Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `add_note`. A good line for the target repo's `CLAUDE.md`/`AGENTS.md`:
+Replace `/path/to/Codebase-Memory` with where you cloned this repo (e.g. `C:/tools/Codebase-Memory` or `~/tools/Codebase-Memory`). After `npm link` you can skip the path: `claude mcp add codemem -- codemem mcp --root .` (on Windows: `-- cmd /c codemem mcp --root .`).
 
-> Before working on an area, call `get_context` for it. After changes call `reindex`; record decisions, conventions, and non-obvious bug fixes with `add_note`.
+Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `read_symbol`, `add_note`, `update_note`, `remove_note`. A good line for the target repo's `CLAUDE.md`/`AGENTS.md`:
+
+> Before working on an area, call `get_context` for it; read a single function with `read_symbol` instead of the whole file. Record decisions, conventions, and non-obvious bug fixes with `add_note`; fix or remove notes marked `⚠ missing` or no longer true.
 
 ## Limits (v1)
 
@@ -57,7 +63,7 @@ Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `add_note`. A good li
 - Symbols: top-level functions, classes, methods, exported constants (TS/JS) and module CONSTANTS (Python). Calls are matched by name, so a method called through an instance (`obj.train()`) is not tracked; a default import or `module.exports = expr` is matched by its local name / the file name.
 - Python: imports and symbols are found by regex, and absolute imports are looked up from the importing file's folder up to the repo root (so a service folder like `ml-service/` works as its own source root), then `src/`.
 - tsconfig `paths` aliases are listed as packages, not resolved.
-- No file watcher. Call `reindex` (cheap) after edits.
+- `context`, `symbol`, `read` and the MCP tools re-hash every file before answering (only changed ones are re-parsed), which may get slow on very large repos. `codemem watch` is the opt-in file watcher.
 
 ## Develop
 

@@ -3,10 +3,10 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { context, findSymbol } from "../src/context.js";
+import { context, findSymbol, readSymbol } from "../src/context.js";
 import { writeGraph } from "../src/graph.js";
-import { definedIn, entryPoints, resolvedCalls, update } from "../src/index.js";
-import { addNote } from "../src/notes.js";
+import { definedIn, entryPoints, isSource, renderMap, resolvedCalls, update } from "../src/index.js";
+import { addNote, loadNotes, removeNote, updateNote, type Note } from "../src/notes.js";
 
 // copy fixtures outside this git repo so the plain directory walk is used and nothing is written into the repo
 const copyFixture = (name: string) => {
@@ -40,6 +40,9 @@ test("builds the Python import graph", () => {
   assert.deepEqual(index.files["svc/app.py"].symbols[0].calls, ["Model"]);
   assert.equal(definedIn(index, "svc/app.py", "Model"), "svc/models/churn.py");
   assert.match(findSymbol(py, "Model.train"), /method `Model.train` defined at `svc\/models\/churn.py:6`/);
+  // a method's block ends before the blank line; the class runs to the end of its last method (nested def included)
+  assert.deepEqual(churn.map((s) => [s.line, s.end]), [[5, 12], [6, 7], [9, 12]]);
+  assert.match(readSymbol(py, "Model.train"), /`svc\/models\/churn.py:6-7`\n\n```\n    def train\(self\):\n        return PORT \+ config.DEBUG\n```/);
 });
 
 test("builds the import graph", () => {
@@ -96,6 +99,30 @@ test("returns selective context with notes", () => {
   assert.throws(() => addNote(root, { kind: "idea", title: "x" }), /kind must be/);
 });
 
+test("edits, removes, and flags out-of-date notes", () => {
+  const dir = copyFixture("sample");
+  update(dir);
+  const n = addNote(dir, { kind: "decision", title: "Greet stays pure", body: "no I/O", paths: ["src/lib/greet.ts", "src/lib"] });
+  // only the passed fields change
+  assert.deepEqual(
+    pick(updateNote(dir, n.id, { title: "Greet is pure", body: undefined })),
+    { kind: "decision", title: "Greet is pure", body: "no I/O", paths: ["src/lib/greet.ts", "src/lib"] },
+  );
+  assert.throws(() => updateNote(dir, n.id, { kind: "idea" }), /kind must be/);
+  assert.throws(() => updateNote(dir, 99, { title: "x" }), /no note #99/);
+
+  rmSync(join(dir, "src/lib/greet.ts"));
+  assert.match(context(dir, "src/lib"), /#1 \[decision\] Greet is pure .*⚠ missing: src\/lib\/greet.ts$/m); // the folder still exists
+  assert.match(renderMap(dir), /- #1 \[decision\] Greet is pure .*⚠ missing: src\/lib\/greet.ts/);
+  updateNote(dir, n.id, { paths: ["src/lib"] });
+  assert.doesNotMatch(renderMap(dir), /⚠/);
+
+  removeNote(dir, n.id);
+  assert.deepEqual(loadNotes(dir), []);
+  assert.throws(() => removeNote(dir, n.id), /no note #1/);
+});
+const pick = ({ kind, title, body, paths }: Note) => ({ kind, title, body, paths });
+
 test("reads CommonJS require and module.exports", () => {
   const cjs = copyFixture("cjs");
   const { index } = update(cjs);
@@ -125,6 +152,26 @@ test("finds where a symbol is defined and who uses it", () => {
   assert.match(context(root, "greet"), /## Symbols/);
   assert.match(context(root, "src/main.ts"), /function `run` :4 \(exported\) → greet \(src\/lib\/greet.ts\)/);
   assert.match(findSymbol(root, "nope"), /No function or class/);
+});
+
+test("reads one symbol's source and re-indexes before answering", () => {
+  update(root);
+  assert.match(readSymbol(root, "App.start"), /`src\/main.ts:9-11`\n\n```\n  start\(\) \{\n    return run\("world"\);\n  \}\n```/);
+  assert.match(readSymbol(root, "run"), /src\/main.ts:4-6/);
+  // no update() call: the query itself picks up the new file
+  writeFileSync(join(root, "src/extra.ts"), `export function extra() {\n  return 1;\n}\n`);
+  assert.match(findSymbol(root, "extra"), /defined at `src\/extra.ts:1`/);
+  assert.match(readSymbol(root, "extra"), /src\/extra.ts:1-3/);
+  assert.match(readSymbol(root, "nope"), /No function or class/);
+});
+
+test("watch reacts only to indexed source files", () => {
+  assert.ok(isSource("src\\lib\\greet.ts")); // Windows separators from fs.watch
+  assert.ok(isSource("svc/app.py"));
+  assert.ok(!isSource("README.md"));
+  assert.ok(!isSource(".codemem/index.json")); // its own output must not retrigger it
+  assert.ok(!isSource("node_modules\\x\\index.js"));
+  assert.ok(!isSource("dist/src/cli.js"));
 });
 
 test("writes the graph page with embedded data", () => {
