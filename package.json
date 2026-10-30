@@ -1,0 +1,25 @@
+{
+  "name": "codebase-memory",
+  "version": "0.1.0",
+  "description": "Long-term codebase memory for AI coding agents: module map, entry points, and notes, served over CLI and MCP.",
+  "type": "module",
+  "bin": {
+    "codemem": "dist/src/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "npm run build && node --test dist/test/*.test.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "typescript": "~5.9",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6"
+  }
+}
