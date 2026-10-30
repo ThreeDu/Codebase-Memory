@@ -10,6 +10,8 @@ Long-term memory for a codebase, so AI coding agents pick up its architecture wi
 
 Everything lives in `.codemem/` inside the target repo (`index.json`, `notes.json`, `map.md`). Commit it so every agent and teammate shares the same memory. Agents without MCP can simply read `.codemem/map.md`.
 
+Full installation and usage guide, with examples for every command: [docs/USAGE.md](docs/USAGE.md).
+
 ## Install
 
 ```bash
