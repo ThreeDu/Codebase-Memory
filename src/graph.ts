@@ -1,5 +1,5 @@
-import { writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { writeAtomic } from "./files.js";
 import { entryPoints, importersOf, resolvedCalls, STORE, update } from "./index.js";
 import { loadNotes, staleMark } from "./notes.js";
 
@@ -22,7 +22,7 @@ export function writeGraph(root: string): string {
   };
   const out = join(root, STORE, "graph.html");
   // "<" escaped so file names or notes can't close the <script> tag
-  writeFileSync(out, PAGE.replace("__DATA__", () => JSON.stringify(data).replace(/</g, "\\u003c")));
+  writeAtomic(out, PAGE.replace("__DATA__", () => JSON.stringify(data).replace(/</g, "\\u003c")));
   return out;
 }
 

@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Stats } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync, type Stats } from "node:fs";
 import { join, posix } from "node:path";
 import ts from "typescript";
+import { writeAtomic } from "./files.js";
 import { loadNotes, staleMark } from "./notes.js";
 import { parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, type Parsed } from "./parse.js";
 
@@ -41,7 +42,12 @@ export const isSource = (f: string) => CODE.test(f) && !f.split(/[\\/]/).some((p
 
 export function loadIndex(root: string): Index {
   const p = storePath(root, "index.json");
-  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : { version: VERSION, files: {} };
+  try {
+    return JSON.parse(readFileSync(p, "utf8"));
+  } catch {
+    // missing, or damaged (disk full, killed mid-write by an older version): it's a cache, so rebuild it
+    return { version: VERSION, files: {} };
+  }
 }
 
 /** Repo-relative posix paths of all files, respecting .gitignore when the root is a git repo. */
@@ -438,8 +444,7 @@ export function update(root: string): { index: Index; parsed: number } {
   // a few files re-saved unchanged: re-hashing them next time is cheaper than rewriting a 100MB+ index now
   const touched = files.filter((f) => !untouched(f)).length;
   if (redo?.size === 0 && touched <= 200) return { index, parsed: 0 };
-  mkdirSync(join(root, STORE), { recursive: true });
-  writeFileSync(storePath(root, "index.json"), JSON.stringify(index)); // compact: it's a cache, often 100MB+ on big repos
+  writeAtomic(storePath(root, "index.json"), JSON.stringify(index)); // compact: it's a cache, often 100MB+ on big repos
   if (!redo || redo.size) writeMap(root, index); // files only re-saved unchanged: the map can't have changed
   return { index, parsed: edited.length };
 }
@@ -596,6 +601,5 @@ export function renderMap(root: string, index = loadIndex(root)): string {
 }
 
 export function writeMap(root: string, index?: Index): void {
-  mkdirSync(join(root, STORE), { recursive: true });
-  writeFileSync(storePath(root, "map.md"), renderMap(root, index));
+  writeAtomic(storePath(root, "map.md"), renderMap(root, index));
 }

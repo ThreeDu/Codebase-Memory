@@ -1,5 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
+import { withLock, writeAtomic } from "./files.js";
 import { STORE } from "./index.js";
 
 export const KINDS = ["decision", "convention", "fix"] as const;
@@ -18,15 +19,20 @@ const notesPath = (root: string) => join(root, STORE, "notes.json");
 
 export function loadNotes(root: string): Note[] {
   const p = notesPath(root);
-  return existsSync(p) ? JSON.parse(readFileSync(p, "utf8")) : [];
+  if (!existsSync(p)) return [];
+  try {
+    return JSON.parse(readFileSync(p, "utf8"));
+  } catch (e) {
+    // never start over silently: the next save would wipe every note
+    throw new Error(`${STORE}/notes.json is not valid JSON (${(e as Error).message}); fix it or restore it from git`);
+  }
 }
 
 type NoteInput = { kind: string; title: string; body?: string; paths?: string[] };
 
-const save = (root: string, notes: Note[]) => {
-  mkdirSync(join(root, STORE), { recursive: true });
-  writeFileSync(notesPath(root), JSON.stringify(notes, null, 1));
-};
+const save = (root: string, notes: Note[]) => writeAtomic(notesPath(root), JSON.stringify(notes, null, 1));
+// read, change and save under one lock: two agents adding a note at once both keep theirs, with different ids
+const locked = <T>(root: string, fn: () => T) => withLock(notesPath(root), fn);
 
 function build(id: number, input: NoteInput): Note {
   if (!KINDS.includes(input.kind as NoteKind)) throw new Error(`kind must be one of: ${KINDS.join(", ")}`);
@@ -42,27 +48,33 @@ function build(id: number, input: NoteInput): Note {
 }
 
 export function addNote(root: string, input: NoteInput): Note {
-  const notes = loadNotes(root);
-  const note = build(Math.max(0, ...notes.map((n) => n.id)) + 1, input);
-  save(root, [...notes, note]);
-  return note;
+  return locked(root, () => {
+    const notes = loadNotes(root);
+    const note = build(Math.max(0, ...notes.map((n) => n.id)) + 1, input);
+    save(root, [...notes, note]);
+    return note;
+  });
 }
 
 /** Change some fields of a note; the others are kept. The date becomes today's. */
 export function updateNote(root: string, id: number, change: Partial<NoteInput>): Note {
-  const notes = loadNotes(root);
-  const i = notes.findIndex((n) => n.id === id);
-  if (i < 0) throw new Error(`no note #${id}`);
-  const defined = Object.fromEntries(Object.entries(change).filter(([, v]) => v !== undefined));
-  notes[i] = build(id, { ...notes[i], ...defined });
-  save(root, notes);
-  return notes[i];
+  return locked(root, () => {
+    const notes = loadNotes(root);
+    const i = notes.findIndex((n) => n.id === id);
+    if (i < 0) throw new Error(`no note #${id}`);
+    const defined = Object.fromEntries(Object.entries(change).filter(([, v]) => v !== undefined));
+    notes[i] = build(id, { ...notes[i], ...defined });
+    save(root, notes);
+    return notes[i];
+  });
 }
 
 export function removeNote(root: string, id: number): void {
-  const notes = loadNotes(root);
-  if (!notes.some((n) => n.id === id)) throw new Error(`no note #${id}`);
-  save(root, notes.filter((n) => n.id !== id));
+  locked(root, () => {
+    const notes = loadNotes(root);
+    if (!notes.some((n) => n.id === id)) throw new Error(`no note #${id}`);
+    save(root, notes.filter((n) => n.id !== id));
+  });
 }
 
 /** Paths the note is about that no longer exist (renamed or deleted), so the note may be out of date. */
