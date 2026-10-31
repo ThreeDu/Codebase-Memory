@@ -20,7 +20,7 @@ From npm (gives you the `codemem` command):
 npm install -g @threedu/codebase-memory
 ```
 
-Or without installing, `npx -y @threedu/codebase-memory <command>`. Also possible: straight from GitHub with `npm install -g github:ThreeDu/Codebase-Memory`, or from a clone with `npm install` (builds too) then `npm link`. Needs Node.js 20+.
+Or without installing, `npx -y @threedu/codebase-memory <command>`. The latest code from GitHub runs with `npx -y github:ThreeDu/Codebase-Memory <command>`; to install it as `codemem`, clone it, run `npm install` (builds too), then `npm link`. (`npm install -g github:...` doesn't work: npm skips the build tools when installing a git package globally.) Needs Node.js 20+.
 
 ## CLI
 

@@ -29,13 +29,13 @@ Install from npm; it puts the `codemem` command on your PATH:
 npm install -g @threedu/codebase-memory
 ```
 
-To try it without installing, prefix commands with `npx -y @threedu/codebase-memory` instead of `codemem`. The latest unreleased code installs straight from GitHub (it builds during install):
+To try it without installing, prefix commands with `npx -y @threedu/codebase-memory` instead of `codemem`. The latest unreleased code runs straight from GitHub the same way (npx builds it on first use):
 
 ```bash
-npm install -g github:ThreeDu/Codebase-Memory
+npx -y github:ThreeDu/Codebase-Memory index
 ```
 
-Or from a clone, if you want to change the code:
+`npm install -g github:ThreeDu/Codebase-Memory` does **not** work: when npm installs a git package globally it doesn't install the build tools the package needs to compile itself. To have the latest code as a `codemem` command, use a clone:
 
 1. Get the code; `npm install` also builds it:
 
