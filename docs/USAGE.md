@@ -19,7 +19,7 @@ Codebase Memory builds a long-term memory of a codebase: the module map, entry p
 - **git** (optional): if the project you index is a git repository, `.gitignore` is respected automatically
 - **Internet access** only for the graph view, which loads its drawing library from a CDN
 
-Supported source files: TypeScript / JavaScript (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, both ES modules and CommonJS) and Python (`.py`).
+Supported source files: TypeScript / JavaScript (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, both ES modules and CommonJS), Python (`.py`), Go (`.go`), Java (`.java`), and Rust (`.rs`). Build output folders (`dist`, `build`, `target`) are skipped.
 
 ## Installation
 
@@ -292,7 +292,7 @@ Watching E:\path\to\your-project (Ctrl+C to stop)
 9:34:25 PM updated map and graph
 ```
 
-Leave it running in a terminal while you code. Every time a TS/JS or Python file is saved, created, or deleted, it re-indexes and rewrites `.codemem/map.md` and `.codemem/graph.html` (several saves within 0.3 s count as one). The open graph page doesn't reload itself: refresh the browser tab to see the change.
+Leave it running in a terminal while you code. Every time a supported source file is saved, created, or deleted, it re-indexes and rewrites `.codemem/map.md` and `.codemem/graph.html` (several saves within 0.3 s count as one). The open graph page doesn't reload itself: refresh the browser tab to see the change.
 
 ### `mcp`: run as an MCP server
 
@@ -359,6 +359,21 @@ Add this to the project's `CLAUDE.md` or `AGENTS.md`:
 
 Agents that can't use MCP can read `.codemem/map.md` directly.
 
+### Or install the skill (Claude Code)
+
+[`skills/codemem/SKILL.md`](../skills/codemem/SKILL.md) is a fuller version of the lines above: when to call each tool, what makes a good note, and when to fall back to grep. Claude Code loads it on its own when a task needs it. Copy the folder to one of:
+
+| Where | Applies to |
+|---|---|
+| `~/.claude/skills/codemem/` | All your projects |
+| `<your-project>/.claude/skills/codemem/` | That project only (commit it so teammates get it) |
+
+```bash
+cp -r /path/to/Codebase-Memory/skills/codemem ~/.claude/skills/
+```
+
+Other agents (Cursor, Codex, ...): paste the body of `SKILL.md` (everything below the `---` header) into their rules file, e.g. `AGENTS.md`.
+
 ## What gets stored
 
 Everything is inside `.codemem/` in the indexed project:
@@ -388,7 +403,9 @@ All files are plain JSON/Markdown and safe to delete. `codemem index` rebuilds e
 | `codemem: command not found` | `npm link` wasn't run, or the npm global folder isn't on your PATH. Use `node <path>/dist/src/cli.js` instead |
 | A positional argument is ignored | Every `--flag` takes the next word as its value. Put `--no-open` last: `codemem graph --root x --no-open` |
 | `codemem: kind must be one of: decision, convention, fix` | `--kind` is missing or misspelled in `note add` |
-| Results look stale | Run `codemem index` again; nothing updates on its own |
+| Results look stale | `context`, `symbol`, `read` and the MCP tools re-index first; `map` and `graph.html` update on `codemem index` or while `codemem watch` runs |
+| Go package or Java/Rust import shows as a package | Go: the import must start with the `module` path of a `go.mod` in the repo. Java: the folders must match the package (`com/shop/User.java` for `com.shop.User`). Rust: only `mod x;` files (`x.rs` or `x/mod.rs`) are followed, not `#[path]` |
+| A Go/Java/Rust function's line range is wrong | Definitions are found by regex: code must be formatted the usual way (gofmt/rustfmt, top-level types at column 0), and a brace inside a block comment or multi-line string confuses it |
 | A function shows no callers you expected | Calls are matched by name: a method called through an instance (`obj.train()`) is not tracked, and a default import is matched by the name used when importing it |
 | Import with a tsconfig `paths` alias (`@/components/...`) shows as a package | Aliases are not resolved yet |
 | Python file imports show as packages | Absolute imports are looked up from the importing file's folder up to the project root, then `src/`. Other source roots aren't searched |

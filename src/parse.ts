@@ -242,3 +242,186 @@ export function parsePy(src: string): Parsed {
   }
   return { specs: [...specs], names, symbols };
 }
+
+// ---- Go, Java, Rust: regex scan of conventionally formatted code (gofmt / rustfmt / Java's usual layout).
+// shortcut: braces inside block comments or raw/multi-line strings throw block ends off; switch to a real parser if that bites.
+const code = (l: string) => l.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'|\/\/.*$/g, '""');
+
+/** 1-based last line of the definition starting at line index `start`: its closing brace, or its own line when it has no body. */
+function blockEnd(lines: string[], start: number): number {
+  const indent = lines[start].search(/\S/);
+  let depth = 0;
+  for (let i = start; i < lines.length; i++) {
+    const t = lines[i].trim();
+    // the next item starts before any "{": this one had no body (Go `type X int`)
+    if (i > start && !depth && t && lines[i].search(/\S/) <= indent && !/^(where|throws)\b|^[{)-]/.test(t)) return start + 1;
+    for (const c of code(lines[i])) {
+      if (c === "{") depth++;
+      else if (c === "}" && --depth === 0) return i + 1;
+      else if (c === ";" && !depth) return i + 1;
+    }
+  }
+  return start + 1;
+}
+
+/** Names a definition calls or mentions as a type. Unknown ones (builtins, locals, packages) are dropped when resolved. */
+function bodyCalls(lines: string[], s: Sym, alias: Map<string, string>): void {
+  const text = lines.slice(s.line - 1, s.end).map(code).join("\n");
+  const calls = new Set<string>();
+  for (const [id] of text.matchAll(/\b[A-Za-z_]\w*(?=\s*\()|\b[A-Z]\w*/g)) {
+    const name = alias.get(id) ?? id;
+    if (name !== s.name && name !== s.parent) calls.add(name);
+  }
+  if (calls.size) s.calls = [...calls].sort();
+}
+
+type Top = { sym?: Omit<Sym, "line">; container?: string }; // container: methods indented under it belong to it
+
+function blockSymbols(
+  src: string,
+  top: (l: string) => Top | undefined,
+  member: (l: string, cls: string) => string | undefined,
+  alias = new Map<string, string>(),
+): Sym[] {
+  const lines = src.split(/\r?\n/);
+  const symbols: Sym[] = [];
+  let cls: { name: string; inner?: number } | undefined;
+  lines.forEach((l, i) => {
+    const indent = l.search(/\S/);
+    if (indent < 0 || /^\s*(\/\/|\/\*|\*)/.test(l)) return;
+    if (indent === 0) {
+      const t = top(l);
+      cls = t?.container ? { name: t.container } : undefined;
+      if (t?.sym) symbols.push({ ...t.sym, line: i + 1, end: blockEnd(lines, i) });
+    } else if (cls) {
+      const name = member(l.trim(), cls.name);
+      if (name && indent === (cls.inner ??= indent))
+        symbols.push({ name, kind: "method", line: i + 1, end: blockEnd(lines, i), parent: cls.name });
+    }
+  });
+  for (const s of symbols) bodyCalls(lines, s, alias);
+  return symbols;
+}
+
+const goExported = (name: string) => /^[A-Z]/.test(name);
+const goTop = (l: string): Top | undefined => {
+  let m = l.match(/^func\s+\(\s*(?:\w+\s+)?\*?\s*(\w+)[^)]*\)\s*(\w+)/);
+  if (m) return { sym: { name: m[2], kind: "method", parent: m[1], exported: goExported(m[2]) } };
+  if ((m = l.match(/^func\s+(\w+)/))) return { sym: { name: m[1], kind: "function", exported: goExported(m[1]) } };
+  if ((m = l.match(/^type\s+(\w+)(.*)/))) {
+    const kind = /^(\[[^\]]*\])?\s*(struct|interface)\b/.test(m[2].trim()) ? "class" : "type";
+    return { sym: { name: m[1], kind, exported: goExported(m[1]) } };
+  }
+};
+
+/** Go: import paths; a package import makes its exported names usable as pkg.Name, so it takes "*". */
+export function parseGo(src: string): Parsed {
+  const specs = new Set<string>();
+  const names: Record<string, string[]> = {};
+  const add = (alias: string | undefined, path: string) => {
+    specs.add(path);
+    if (alias !== "_") pushUnique(names, path, "*"); // `_` imports only for side effects
+  };
+  for (const [, block] of src.matchAll(/^import\s*\(([^)]*)\)/gm))
+    for (const [, alias, path] of block.matchAll(/^\s*(\w+|\.)?\s*"([^"]+)"/gm)) add(alias, path);
+  for (const [, alias, path] of src.matchAll(/^import\s+(\w+|\.)?\s*"([^"]+)"/gm)) add(alias, path);
+  return { specs: [...specs], names, symbols: blockSymbols(src, goTop, () => undefined) };
+}
+
+const JAVA_MODS = "public|protected|private|static|final|abstract|synchronized|native|default|strictfp|sealed|non-sealed";
+const JAVA_TOP = new RegExp(
+  `^(?:@\\w+(?:\\([^)]*\\))?\\s+)*((?:(?:${JAVA_MODS})\\s+)*)(?:class|interface|enum|record|@interface)\\s+(\\w+)`,
+);
+const javaTop = (l: string): Top | undefined => {
+  const m = l.match(JAVA_TOP);
+  return m ? { sym: { name: m[2], kind: "class", exported: /\bpublic\b/.test(m[1]) }, container: m[2] } : undefined;
+};
+const JAVA_MEMBER = new RegExp(
+  `^(?:@\\w+(?:\\([^)]*\\))?\\s+)*((?:(?:${JAVA_MODS})\\s+)*)(?:<[^>]*>\\s+)?(?:([\\w.$]+(?:<.*?>)?(?:\\[\\])*)\\s+)?(\\w+)\\s*\\(`,
+);
+const NOT_A_TYPE = new Set(["return", "new", "throw", "else", "case", "yield"]);
+const javaMember = (l: string, cls: string) => {
+  const m = l.match(JAVA_MEMBER);
+  if (!m || NOT_A_TYPE.has(m[2] ?? "")) return undefined;
+  // a statement like `doIt(x);` has neither modifiers nor a return type; a constructor is named after its class
+  return m[1] || m[2] || m[3] === cls ? m[3] : undefined;
+};
+
+/** Java: "a.b.C" for `import a.b.C;`, "a.b.*" for a package, "a.b.C.m" for a static import; the name is the last part. */
+export function parseJava(src: string): Parsed {
+  const names: Record<string, string[]> = {};
+  for (const [, spec] of src.matchAll(/^\s*import\s+(?:static\s+)?([\w.]+(?:\.\*)?)\s*;/gm))
+    pushUnique(names, spec, spec.split(".").pop()!);
+  return { specs: Object.keys(names), names, symbols: blockSymbols(src, javaTop, javaMember) };
+}
+
+const RS_VIS = /^pub(?:\([^)]*\))?\s+/;
+const RS_FN = /^(?:(?:async|const|unsafe|extern\s+"\w+")\s+)*fn\s+(\w+)/;
+const rsTop = (l: string): Top | undefined => {
+  const exported = RS_VIS.test(l);
+  const rest = l.replace(RS_VIS, "");
+  let m = rest.match(RS_FN);
+  if (m) return { sym: { name: m[1], kind: "function", exported } };
+  if ((m = rest.match(/^(struct|enum|union|trait)\s+(\w+)/)))
+    return { sym: { name: m[2], kind: "class", exported }, container: m[1] === "trait" ? m[2] : undefined };
+  if ((m = rest.match(/^type\s+(\w+)/))) return { sym: { name: m[1], kind: "type", exported } };
+  if ((m = rest.match(/^(?:const|static)\s+(?:mut\s+)?([A-Z_][A-Z0-9_]*)\s*:/))) return { sym: { name: m[1], kind: "const", exported } };
+  if (rest.startsWith("impl")) {
+    let t = rest;
+    while (/<[^<>]*>/.test(t)) t = t.replace(/<[^<>]*>/g, ""); // drop generics: impl<T> Trait for Foo<T>
+    const impl = t.match(/^impl\s+(?:.*?\bfor\s+)?(?:\w+::)*(\w+)/);
+    return impl ? { container: impl[1] } : undefined;
+  }
+};
+const rsMember = (l: string) => l.replace(RS_VIS, "").match(RS_FN)?.[1];
+
+/** `a::{b, c::{D, E}}` -> ["a::b", "a::c::D", "a::c::E"]; `a::{self}` -> "a". */
+function expandUse(p: string): string[] {
+  const open = p.indexOf("{");
+  if (open < 0) return [p.trim()];
+  const prefix = p.slice(0, open).trim();
+  const inner = p.slice(open + 1, p.lastIndexOf("}"));
+  const parts: string[] = [];
+  let depth = 0;
+  let from = 0;
+  for (let i = 0; i < inner.length; i++) {
+    if (inner[i] === "{") depth++;
+    else if (inner[i] === "}") depth--;
+    else if (inner[i] === "," && !depth) {
+      parts.push(inner.slice(from, i));
+      from = i + 1;
+    }
+  }
+  parts.push(inner.slice(from));
+  return parts
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .flatMap((s) => expandUse(s === "self" ? prefix.replace(/::$/, "") : prefix + s));
+}
+
+/** Rust: `use` paths ("crate::a::B") and `mod m;` as "self::m". Names: the item imported, plus x for every `m::x` in the file. */
+export function parseRust(src: string): Parsed {
+  const specs = new Set<string>();
+  const names: Record<string, string[]> = {};
+  const alias = new Map<string, string>();
+  const local: [string, string][] = []; // spec, the name this file uses it by
+  for (const [, mod] of src.matchAll(/^\s*(?:pub(?:\([^)]*\))?\s+)?mod\s+(\w+)\s*;/gm)) local.push([`self::${mod}`, mod]);
+  for (const [, tree] of src.matchAll(/^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+([^;]+);/gm))
+    for (const item of expandUse(tree.replace(/\s+/g, " "))) {
+      const [path, as] = item.split(/\s+as\s+/);
+      const last = path.split("::").pop()!;
+      if (last === "*") {
+        specs.add(path.slice(0, -3));
+        pushUnique(names, path.slice(0, -3), "*");
+        continue;
+      }
+      pushUnique(names, path, last);
+      if (as && as !== "_") alias.set(as, last);
+      local.push([path, as ?? last]);
+    }
+  for (const [spec, name] of local) {
+    specs.add(spec);
+    for (const [, x] of src.matchAll(new RegExp(`\\b${name}::(\\w+)`, "g"))) pushUnique(names, spec, x);
+  }
+  return { specs: [...specs], names, symbols: blockSymbols(src, rsTop, rsMember, alias) };
+}

@@ -2,7 +2,7 @@
 
 Long-term memory for a codebase, so AI coding agents pick up its architecture without re-scanning everything.
 
-- **Module map**: every TS/JS and Python file with its resolved imports and packages, plus its entry points and most depended-on modules.
+- **Module map**: every TS/JS, Python, Go, Java, and Rust file with its resolved imports and packages, plus its entry points and most depended-on modules.
 - **Symbols**: the functions, classes, and methods each file defines, which names it takes from which file, and which of those each function calls, so you can ask where `ChurnPredictor` is defined and which functions use it.
 - **Notes**: architecture decisions, code conventions, and bugs that were already fixed, each attached to the files or folders it's about.
 - **Incremental**: only files whose content changed get re-parsed.
@@ -57,9 +57,12 @@ Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `read_symbol`, `add_n
 
 > Before working on an area, call `get_context` for it; read a single function with `read_symbol` instead of the whole file. Record decisions, conventions, and non-obvious bug fixes with `add_note`; fix or remove notes marked `⚠ missing` or no longer true.
 
+Or give Claude Code the full usage guide as a skill: `cp -r skills/codemem ~/.claude/skills/` (see [docs/USAGE.md](docs/USAGE.md#or-install-the-skill-claude-code)).
+
 ## Limits (v1)
 
-- Parses TS/JS (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, ES modules and CommonJS) and Python (`.py`).
+- Parses TS/JS (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, ES modules and CommonJS), Python (`.py`), Go (`.go`), Java (`.java`), and Rust (`.rs`).
+- Go, Java, Rust: found by regex on conventionally formatted code (gofmt, rustfmt, top-level types at column 0). Go imports of the module in `go.mod` resolve to every non-test file in that package's folder; Java `a.b.C` resolves to the file ending in `a/b/C.java` under any source root; Rust follows `mod x;`, `use crate::/self::/super::`, groups, `as`, and `pub use` re-exports. Go and Java files are linked to files of their own package (same folder) whose functions/types they use. Braces inside block comments or multi-line strings can throw off a definition's end line.
 - Symbols: top-level functions, classes, methods, exported constants (TS/JS) and module CONSTANTS (Python). Calls are matched by name, so a method called through an instance (`obj.train()`) is not tracked; a default import or `module.exports = expr` is matched by its local name / the file name.
 - Python: imports and symbols are found by regex, and absolute imports are looked up from the importing file's folder up to the repo root (so a service folder like `ml-service/` works as its own source root), then `src/`.
 - tsconfig `paths` aliases are listed as packages, not resolved.

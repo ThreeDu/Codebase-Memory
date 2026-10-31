@@ -67,7 +67,7 @@ export function readSymbol(root: string, name: string): string {
 export function context(root: string, target: string, budget = 8000): string {
   const index = fresh(root);
   const files = Object.keys(index.files).sort();
-  if (!files.length) return "No TS/JS or Python files found.";
+  if (!files.length) return "No supported source files found.";
 
   const t = normalizePath(target);
   const kw = t.toLowerCase();

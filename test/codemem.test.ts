@@ -165,6 +165,57 @@ test("reads one symbol's source and re-indexes before answering", () => {
   assert.match(readSymbol(root, "nope"), /No function or class/);
 });
 
+const kinds = (index: ReturnType<typeof update>["index"], f: string) =>
+  index.files[f].symbols.map((s) => [s.kind, s.parent ? `${s.parent}.${s.name}` : s.name, s.line, s.end]);
+const callsOf = (index: ReturnType<typeof update>["index"], f: string, name: string) =>
+  resolvedCalls(index, f, index.files[f].symbols.find((s) => s.name === name)!.calls).map((c) => `${c.name}@${c.file}`);
+
+test("reads Go: module imports, same-package files, methods", () => {
+  const go = copyFixture("gosample");
+  const { index } = update(go);
+  // a package import is every non-test file of that folder; util.go is the same package, used without an import
+  assert.deepEqual(index.files["main.go"].imports, ["internal/store/store.go", "util.go"]);
+  assert.deepEqual(index.files["main.go"].external, ["fmt"]);
+  assert.deepEqual(index.files["internal/store/store.go"].external, ["github.com/google/uuid"]);
+  assert.deepEqual(entryPoints(go, index), ["main.go"]); // store_test.go is a test
+  assert.deepEqual(kinds(index, "internal/store/store.go"), [["class", "Store", 6, 8], ["function", "New", 10, 12], ["method", "Store.Count", 14, 16]]);
+  // `type Label string` has no body; the "{" inside a string doesn't open one
+  assert.deepEqual(kinds(index, "util.go"), [["type", "Label", 3, 3], ["function", "greeting", 5, 7], ["function", "itoa", 9, 9]]);
+  assert.deepEqual(callsOf(index, "main.go", "main"), ["New@internal/store/store.go", "greeting@util.go"]);
+  assert.match(findSymbol(go, "greeting"), /used by `main.go` in: main/);
+  assert.match(readSymbol(go, "Store.Count"), /store.go:14-16`\n\n```\nfunc \(s \*Store\) Count\(\) int \{\n\treturn len\(s.items\)\n\}\n```/);
+});
+
+test("reads Java: class imports, wildcard and same-package, methods", () => {
+  const java = copyFixture("javasample");
+  const { index } = update(java);
+  const src = "src/main/java/com/shop/";
+  assert.deepEqual(index.files[`${src}App.java`].imports, [`${src}UserService.java`, `${src}model/User.java`]);
+  assert.deepEqual(index.files[`${src}App.java`].external, ["java.util"]);
+  assert.deepEqual(index.files[`${src}UserService.java`].imports, [`${src}model/User.java`]); // import com.shop.model.*
+  assert.deepEqual(entryPoints(java, index), [`${src}App.java`]); // AppTest is under src/test
+  // a field initializer and statements aren't methods; a constructor is; the javadoc's "{" is ignored
+  assert.deepEqual(kinds(index, `${src}UserService.java`), [["class", "UserService", 9, 19], ["method", "UserService.UserService", 10, 11], ["method", "UserService.all", 13, 18]]);
+  assert.deepEqual(kinds(index, `${src}model/User.java`), [["class", "User", 3, 4]]);
+  assert.deepEqual(callsOf(index, `${src}App.java`, "App"), [`User@${src}model/User.java`, `UserService@${src}UserService.java`]);
+  assert.match(findSymbol(java, "User"), /used by `src\/main\/java\/com\/shop\/UserService.java` in: UserService, UserService.all/);
+});
+
+test("reads Rust: mod, use (groups, as, super, re-exports), impl methods", () => {
+  const rs = copyFixture("rustsample");
+  const { index } = update(rs);
+  assert.deepEqual(index.files["src/main.rs"].imports, ["src/models/mod.rs", "src/util.rs"]);
+  assert.deepEqual(index.files["src/main.rs"].external, ["serde"]);
+  assert.deepEqual(index.files["src/util.rs"].imports, ["src/models/mod.rs"]); // super::models
+  assert.deepEqual(index.files["src/models/mod.rs"].imports, ["src/models/status.rs"]);
+  assert.deepEqual(entryPoints(rs, index), ["src/main.rs"]);
+  assert.deepEqual(kinds(index, "src/models/mod.rs"), [["class", "Order", 5, 7], ["method", "Order.new", 10, 12], ["method", "Order.total", 14, 16]]);
+  assert.deepEqual(kinds(index, "src/models/status.rs"), [["class", "Status", 2, 5]]);
+  // `Status as OrderStatus` maps back to Status, which `pub use` re-exports from status.rs; util::describe via `mod util;`
+  assert.deepEqual(callsOf(index, "src/main.rs", "main"), ["Order@src/models/mod.rs", "Status@src/models/status.rs", "describe@src/util.rs"]);
+  assert.match(readSymbol(rs, "Order.total"), /mod.rs:14-16`/);
+});
+
 test("watch reacts only to indexed source files", () => {
   assert.ok(isSource("src\\lib\\greet.ts")); // Windows separators from fs.watch
   assert.ok(isSource("svc/app.py"));
