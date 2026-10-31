@@ -249,20 +249,23 @@ export function parsePy(src: string): Parsed {
 
 // ---- Go, Java, Rust: regex scan of conventionally formatted code (gofmt / rustfmt / Java's usual layout).
 // shortcut: braces inside block comments or raw/multi-line strings throw block ends off; switch to a real parser if that bites.
-const code = (l: string) => l.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'|\/\/.*$/g, '""');
+const code = (l: string) => l.replace(/"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'|`[^`]*`|\/\/.*$/g, '""'); // `..`: Go raw strings
 
 /** 1-based last line of the definition starting at line index `start`: its closing brace, or its own line when it has no body. */
 function blockEnd(lines: string[], start: number): number {
   const indent = lines[start].search(/\S/);
   let depth = 0;
+  let parens = 0; // ( and [: a ";" inside them (Rust `[u8; 32]`) doesn't end a bodiless declaration
   for (let i = start; i < lines.length; i++) {
     const t = lines[i].trim();
     // the next item starts before any "{": this one had no body (Go `type X int`)
-    if (i > start && !depth && t && lines[i].search(/\S/) <= indent && !/^(where|throws)\b|^[{)-]/.test(t)) return start + 1;
+    if (i > start && !depth && t && lines[i].search(/\S/) <= indent && !/^(where|throws)\b|^[{)\]-]/.test(t)) return start + 1;
     for (const c of code(lines[i])) {
       if (c === "{") depth++;
       else if (c === "}" && --depth === 0) return i + 1;
-      else if (c === ";" && !depth) return i + 1;
+      else if (c === "(" || c === "[") parens++;
+      else if (c === ")" || c === "]") parens--;
+      else if (c === ";" && !depth && parens <= 0) return i + 1;
     }
   }
   return start + 1;

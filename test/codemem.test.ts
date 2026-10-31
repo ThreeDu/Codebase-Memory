@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -186,6 +186,26 @@ test("reads Go: module imports, same-package files, methods", () => {
   assert.match(readSymbol(go, "Store.Count"), /store.go:14-16`\n\n```\nfunc \(s \*Store\) Count\(\) int \{\n\treturn len\(s.items\)\n\}\n```/);
 });
 
+test("re-index after an edit updates links around the edited file only", () => {
+  const go = copyFixture("gosample");
+  update(go);
+  const later = new Date(Date.now() + 5000);
+  // re-saved unchanged (new mtime): nothing re-parsed, links kept
+  utimesSync(join(go, "util.go"), later, later);
+  assert.equal(update(go).parsed, 0);
+  assert.deepEqual(update(go).index.files["main.go"].imports, ["internal/store/store.go", "util.go"]);
+  // greeting renamed: main.go (an importer of util.go, not itself edited) loses the link
+  writeFileSync(join(go, "util.go"), `package main\n\nfunc greet2(n int) string {\n\treturn ""\n}\n`);
+  let { index, parsed } = update(go);
+  assert.equal(parsed, 1);
+  assert.deepEqual(index.files["main.go"].imports, ["internal/store/store.go"]);
+  // main.go edited to stop importing the store package
+  writeFileSync(join(go, "main.go"), `package main\n\nfunc main() {\n\tgreet2(1)\n}\n`);
+  ({ index } = update(go));
+  assert.deepEqual(index.files["main.go"].imports, ["util.go"]);
+  assert.deepEqual(index.files["main.go"].external, []);
+});
+
 test("reads Java: class imports, wildcard and same-package, methods", () => {
   const java = copyFixture("javasample");
   const { index } = update(java);
@@ -279,11 +299,16 @@ test("handles patterns found in real repos", () => {
   put("Cargo.toml", `[package]\nname = "my-app"\n\n[dependencies]\nserde_json = "1"\n`);
   put("src/lib.rs", `pub fn run() {}\n`);
   put("src/main.rs", `fn main() {\n    my_app::run();\n    let _ = serde_json::to_string(&1);\n}\n`);
+  // end lines: a ";" inside an array type in a multi-line signature, and a "{" in a Go raw string
+  put("src/hash.rs", `pub fn finish(\n    out: [u8; 32],\n) -> [u8; 32] {\n    out\n}\n`);
+  put("raw.go", "package main\n\nfunc body() []byte {\n\treturn []byte(`{`)\n}\n");
   const { index } = update(dir);
   assert.ok(entryPoints(dir, index).includes("main.py"));
   assert.deepEqual(index.files["src/main.rs"].imports, ["src/lib.rs"]);
   assert.deepEqual(index.files["src/main.rs"].external, ["serde_json"]);
   assert.deepEqual(callsOf(index, "src/main.rs", "main"), ["run@src/lib.rs"]);
+  assert.deepEqual(kinds(index, "src/hash.rs"), [["function", "finish", 1, 5]]);
+  assert.deepEqual(kinds(index, "raw.go"), [["function", "body", 3, 5]]);
   // one heading per folder even though "config.py" < "main.py" sort around "src/" and "ui/"
   assert.equal(renderMap(dir, index).match(/^### \(root\)$/gm)?.length, 1);
 });
@@ -317,6 +342,8 @@ test("watch reacts only to indexed source files", () => {
   assert.ok(!isSource(".codemem/index.json")); // its own output must not retrigger it
   assert.ok(!isSource("node_modules\\x\\index.js"));
   assert.ok(!isSource("dist/src/cli.js"));
+  assert.ok(!isSource("vendor/github.com/x/y.go")); // vendored dependencies
+  assert.ok(!isSource("src/third_party/zlib/inflate.c"));
 });
 
 test("writes the graph page with embedded data", () => {

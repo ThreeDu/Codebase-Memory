@@ -102,7 +102,19 @@ codemem index path/to/project
 Indexed 173 files (12 re-parsed) into /path/to/project/.codemem
 ```
 
-Scans all supported source files, records each file's imports, the names it imports, its functions/classes/methods, and what each function calls. A file is only re-parsed when its content changed. It also regenerates `.codemem/map.md`.
+Scans all supported source files, records each file's imports, the names it imports, its functions/classes/methods, and what each function calls. A file is only read again when its modification time or size changed, and only re-parsed when its content changed. It also regenerates `.codemem/map.md`. Build output and vendored dependencies (`vendor/`, `third_party/`, `thirdparty/`, `3rdparty/`) are skipped.
+
+First run on big repos (one-time; afterwards a no-change run takes 0.1–6 s):
+
+| Repo | Source files | First index | Memory |
+|---|---|---|---|
+| Express | 142 | 1 s | 0.1 GB |
+| Django | 2,984 | 4 s | 0.3 GB |
+| Kubernetes | 13,711 | 15 s | 0.7 GB |
+| VS Code | 15,408 | 65 s | 1.2 GB |
+| LLVM | 77,031 | 2.5 min | 2.7 GB |
+
+On repos the size of LLVM, give Node more memory if it runs out: `NODE_OPTIONS=--max-old-space-size=8192`.
 
 ### `map`: print the project overview
 
@@ -129,7 +141,7 @@ codemem map
   - defines: run, class App
 ```
 
-- **Entry points**: files listed in `package.json` (`main`, `bin`, `exports`), source files nothing imports (tests and `__init__.py` excluded), and files that run on their own even if something imports them back: a Python `if __name__ == "__main__":` block, or a top-level `main` function (Java: a `main` method). An unexpected entry point is often dead code.
+- **Entry points**: files listed in `package.json` (`main`, `bin`, `exports`); TS/JS, Python and Rust files nothing imports (tests and `__init__.py` excluded); and files that run on their own: a Python `if __name__ == "__main__":` block, a top-level `main` function, a Java `main` / C# `Main` method. Go, Java, C/C++ and C# files count only with a main, since a `.cpp` is compiled rather than included and a Go/Java/C# file belongs to its package. An unexpected TS/JS/Python entry point is often dead code. On a big repo only the first 60 are listed.
 - **Most depended-on**: changing these affects the most files.
 - **Modules**: every file with what it imports (`pkg:` = external package) and what it defines.
 
@@ -381,7 +393,7 @@ Everything is inside `.codemem/` in the indexed project:
 
 | File | Content | Commit it? |
 |---|---|---|
-| `index.json` | Files, hashes, imports, symbols, calls | Yes, so others skip the first full scan |
+| `index.json` | Files, hashes, imports, symbols, calls | Optional on small repos (others skip the first scan); no on big ones: it's 50–250MB on repos like Kubernetes or LLVM and rebuilds itself |
 | `notes.json` | Your notes | **Yes**: this is the knowledge you can't regenerate |
 | `map.md` | Generated overview | Yes, so agents without MCP can read it |
 | `graph.html` | Generated graph page | Optional: it's large and regenerated on every `graph` run; add `.codemem/graph.html` to `.gitignore` if you prefer |

@@ -1,32 +1,38 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync, type Stats } from "node:fs";
 import { join, posix } from "node:path";
 import ts from "typescript";
 import { loadNotes, staleMark } from "./notes.js";
 import { parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, type Parsed } from "./parse.js";
 
 export const STORE = ".codemem";
-const VERSION = 7; // bump when parse output changes, so cached entries get re-parsed
+const VERSION = 8; // bump when parse output changes, so cached entries get re-parsed
 const CODE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|java|rs|c|h|cc|cpp|cxx|hh|hpp|hxx|cs)$/;
 const EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
+// build output and vendored dependencies (other people's code: on Kubernetes or MongoDB it's a third of the files)
 const SKIP = new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", "target", "obj", STORE]);
-// test files and folders; the last part is C# test projects (MyApp.Tests/)
+for (const d of ["vendor", "third_party", "thirdparty", "3rdparty"]) SKIP.add(d);
+// test files and folders: tests/, jstests/, unittests/, testdata/, fixtures/, __tests__/, __mocks__/, C# MyApp.Tests/
 const TEST =
-  /(\.|\/)(test|spec)\.[^/]+$|(^|\/)(__tests__|tests?)\/|(^|\/)(test_[^/]*|[^/]*_test|conftest)\.py$|_test\.go$|(^|\/)[^/]*\.Tests?\//;
+  /(\.|\/)(test|spec)\.[^/]+$|(^|\/)(tests?|[\w-]*tests|testing|testdata|fixtures?|__\w+__)\/|(^|\/)(test_[^/]*|[^/]*_test|conftest)\.py$|_test\.go$|(^|\/)[^/]*\.Tests?\//;
 
-// specs/names/symbols are parse output, cached by hash; imports/external/uses are re-resolved every run
-// so new or deleted target files are picked up
+// specs/names/symbols are parse output, cached by mtime+size (then hash); imports/external/uses are re-resolved
+// whenever anything changed, so new or deleted target files are picked up
 export interface FileEntry extends Parsed {
   hash: string;
+  mtime: number;
+  size: number;
   imports: string[]; // resolved repo-relative paths
   external: string[]; // package names
   uses: Record<string, string[]>; // imported file -> names this file takes from it
 }
 export interface Index {
   version: number;
+  fingerprint?: string; // config files that change how imports resolve (go.mod, Cargo.toml, tsconfig), with mtimes
   files: Record<string, FileEntry>;
 }
+const CONFIG = /^(go\.mod|Cargo\.toml|(tsconfig.*|jsconfig)\.json)$/;
 
 const storePath = (root: string, name: string) => join(root, STORE, name);
 
@@ -196,7 +202,17 @@ function implOf(h: string, ctx: Ctx): string | undefined {
   const exts = [".c", ".cc", ".cpp", ".cxx"];
   const next = exts.map((e) => stem + e).find((c) => ctx.known.has(c));
   const anywhere = exts.flatMap((e) => ctx.byName.get(posix.basename(stem) + e) ?? []);
-  return next ?? (anywhere.length === 1 ? anywhere[0] : undefined);
+  if (next || anywhere.length <= 1) return next ?? anywhere[0];
+  // several with that name: the one sharing the most trailing folders (include/llvm/IR/Function.h <-> lib/IR/Function.cpp)
+  const dirs = posix.dirname(h).split("/").reverse();
+  const shared = (c: string) => {
+    const d = posix.dirname(c).split("/").reverse();
+    let n = 0;
+    while (n < d.length && d[n] === dirs[n]) n++;
+    return n;
+  };
+  const [best, second] = anywhere.map((c) => [c, shared(c)] as const).sort((a, b) => b[1] - a[1]);
+  return best[1] > second[1] ? best[0] : undefined;
 }
 
 type Lang = "ts" | "py" | "go" | "java" | "rs" | "c" | "cs";
@@ -254,11 +270,30 @@ const push = (m: Map<string, string[]>, k: string, v: string) => {
   else m.set(k, [v]);
 };
 
-/** Incrementally re-index: only files whose content hash changed are re-parsed. */
+/** Incrementally re-index: unchanged files (same mtime and size) aren't even read; only changed content is re-parsed. */
 export function update(root: string): { index: Index; parsed: number } {
   const old = loadIndex(root);
   const all = listFiles(root);
-  const files = all.filter((f) => CODE.test(f) && existsSync(join(root, f)));
+  const stats = new Map<string, Stats>();
+  for (const f of all) {
+    const st = CODE.test(f) ? statSync(join(root, f), { throwIfNoEntry: false }) : undefined;
+    if (st?.isFile()) stats.set(f, st);
+  }
+  const files = [...stats.keys()];
+  const fingerprint = all
+    .filter((f) => CONFIG.test(posix.basename(f)))
+    .map((f) => {
+      const st = statSync(join(root, f), { throwIfNoEntry: false });
+      return `${f}:${st?.mtimeMs}:${st?.size}`;
+    })
+    .join("|");
+  const same = old.version === VERSION;
+  const untouched = (f: string) => old.files[f]?.mtime === stats.get(f)!.mtimeMs && old.files[f].size === stats.get(f)!.size;
+  // nothing changed: skip resolving and rewriting, which on a 30k-file repo costs more than the check
+  if (same && old.fingerprint === fingerprint && files.length === Object.keys(old.files).length && files.every(untouched)) {
+    if (!existsSync(storePath(root, "map.md"))) writeMap(root, old);
+    return { index: old, parsed: 0 };
+  }
   const ctx: Ctx = { known: new Set(files), byDir: new Map(), byName: new Map(), goMods: [], crates: [], tsPaths: [] };
   for (const f of files) {
     push(ctx.byDir, posix.dirname(f), f);
@@ -285,24 +320,63 @@ export function update(root: string): { index: Index; parsed: number } {
   }
   ctx.tsPaths.sort((a, b) => b.dir.length - a.dir.length);
 
-  const index: Index = { version: VERSION, files: {} };
-  let parsed = 0;
+  const index: Index = { version: VERSION, fingerprint, files: {} };
+  const edited: string[] = []; // new files and files whose content changed
   for (const f of files) {
-    const src = readFileSync(join(root, f), "utf8");
-    const hash = createHash("sha1").update(src).digest("hex");
+    const st = stats.get(f)!;
     const prev = old.files[f];
-    const lang = langOf(f);
-    let p: Parsed | undefined = old.version === VERSION && prev?.hash === hash ? prev : undefined;
-    if (!p) {
-      p = parse(lang, f, src);
-      parsed++;
+    let p: Parsed | undefined;
+    let hash: string;
+    if (same && untouched(f)) [p, hash] = [prev, prev.hash];
+    else {
+      const src = readFileSync(join(root, f), "utf8");
+      hash = createHash("sha1").update(src).digest("hex");
+      p = same && prev?.hash === hash ? prev : undefined; // touched but not edited (checkout, save without changes)
+      if (!p) {
+        p = parse(langOf(f), f, src);
+        edited.push(f);
+      }
     }
+    const { specs, names, symbols, main, namespaces, refs } = p;
+    const parsedPart = { specs, names, symbols, main, namespaces, refs };
+    index.files[f] = { hash, mtime: st.mtimeMs, size: st.size, ...parsedPart, imports: [], external: [], uses: {} };
+  }
+
+  // Same files and configs as last time: only the edited files and the files around them (their folder, which is a
+  // Go/Java package or a header next to its source, and whatever imports those) can resolve differently. The rest
+  // keep last run's links, so one save in a 30k-file repo doesn't re-resolve all of it.
+  // shortcut: a file elsewhere that starts using a name just added (C# namespace in another folder) is linked on the next
+  // full run, which happens whenever a file is added or removed or a config changes.
+  let redo: Set<string> | undefined;
+  if (same && old.fingerprint === fingerprint && files.length === Object.keys(old.files).length && files.every((f) => old.files[f])) {
+    redo = new Set();
+    const importers = edited.length ? importersOf(old) : new Map<string, string[]>();
+    for (const g of edited)
+      for (const s of ctx.byDir.get(posix.dirname(g)) ?? []) {
+        redo.add(s);
+        for (const i of importers.get(s) ?? []) redo.add(i);
+      }
+    for (const f of files) {
+      const o = old.files[f];
+      if (!redo.has(f)) Object.assign(index.files[f], { imports: o.imports, external: o.external, uses: o.uses });
+    }
+  }
+
+  const goPackages = new Map<string, string[][]>(); // Go file -> the files of each package it imports, linked below
+  for (const f of files) {
+    if (redo && !redo.has(f)) continue;
+    const p = index.files[f];
+    const lang = langOf(f);
     const imports = new Set<string>();
     const external = new Set<string>();
     const uses: Record<string, string[]> = {};
     const localTops = new Set<string>(); // namespace packages (no __init__.py) are local once any submodule resolves
     for (const s of p.specs) {
       const targets = resolveSpec(lang, f, s, ctx);
+      if (lang === "go" && targets.length) {
+        goPackages.set(f, [...(goPackages.get(f) ?? []), targets]);
+        continue;
+      }
       for (const r of targets) {
         if (r === f) continue;
         imports.add(r);
@@ -313,29 +387,32 @@ export function update(root: string): { index: Index; parsed: number } {
       if (ext) external.add(ext);
     }
     for (const t of localTops) external.delete(t);
-    const { specs, names, symbols, main, namespaces, refs } = p;
-    const entry = { hash, specs, names, symbols, main, namespaces, refs, uses };
-    index.files[f] = { ...entry, imports: [...imports].sort(), external: [...external].sort() };
+    Object.assign(p, { imports: [...imports].sort(), external: [...external].sort(), uses });
   }
 
   // Links no import line states: Go/Java files use their package (folder), C/C++ files use the source behind an
-  // included header, C# files use the files of every namespace in view. Only names the file mentions count, so an
-  // unrelated file of the same package or namespace isn't linked.
+  // included header, C# files use the files of every namespace in view, and a Go import reaches only the files of that
+  // package defining what's used (not all 50 files of it). Only names the file mentions count.
   const nsFiles = new Map<string, string[]>();
   for (const [f, e] of Object.entries(index.files)) for (const ns of e.namespaces ?? []) push(nsFiles, ns, f);
   for (const [f, e] of Object.entries(index.files)) {
+    if (redo && !redo.has(f)) continue;
     const lang = langOf(f);
     const mentioned = new Set(e.refs ?? e.symbols.flatMap((s) => s.calls ?? []));
-    const link = (g: string) => {
-      if (g === f) return;
+    const imports = new Set(e.imports);
+    const link = (g: string, names?: string[]) => {
+      if (g === f) return false;
       // a class counts when g defines its methods: Foo::bar in foo.cpp implements Foo declared in foo.h
-      const used = [...new Set(index.files[g].symbols.map((s) => s.parent ?? s.name))].filter((n) => mentioned.has(n));
-      if (!used.length) return;
-      e.imports = [...new Set([...e.imports, g])].sort();
+      const used = names ?? [...new Set(index.files[g].symbols.map((s) => s.parent ?? s.name))].filter((n) => mentioned.has(n));
+      if (!used.length) return false;
+      imports.add(g);
       e.uses[g] = [...new Set([...(e.uses[g] ?? []), ...used])];
+      return true;
     };
     if (lang === "go" || lang === "java") {
       for (const g of ctx.byDir.get(posix.dirname(f)) ?? []) if (posix.extname(g) === posix.extname(f)) link(g);
+      // a package used only for its consts/vars (not indexed) still counts as imported, as a whole
+      for (const pkg of goPackages.get(f) ?? []) if (!pkg.map((g) => link(g)).some(Boolean)) for (const g of pkg) link(g, ["*"]);
     } else if (lang === "c") {
       for (const h of [...e.imports]) {
         const impl = implOf(h, ctx);
@@ -356,17 +433,20 @@ export function update(root: string): { index: Index; parsed: number } {
       e.external = [...external].sort();
       for (const ns of inView) for (const g of nsFiles.get(ns) ?? []) link(g);
     }
+    e.imports = [...imports].sort();
   }
+  // a few files re-saved unchanged: re-hashing them next time is cheaper than rewriting a 100MB+ index now
+  const touched = files.filter((f) => !untouched(f)).length;
+  if (redo?.size === 0 && touched <= 200) return { index, parsed: 0 };
   mkdirSync(join(root, STORE), { recursive: true });
-  writeFileSync(storePath(root, "index.json"), JSON.stringify(index, null, 1));
-  writeMap(root, index);
-  return { index, parsed };
+  writeFileSync(storePath(root, "index.json"), JSON.stringify(index)); // compact: it's a cache, often 100MB+ on big repos
+  if (!redo || redo.size) writeMap(root, index); // files only re-saved unchanged: the map can't have changed
+  return { index, parsed: edited.length };
 }
 
 export function importersOf(index: Index): Map<string, string[]> {
   const m = new Map<string, string[]>();
-  for (const [f, e] of Object.entries(index.files))
-    for (const i of e.imports) m.set(i, [...(m.get(i) ?? []), f]);
+  for (const [f, e] of Object.entries(index.files)) for (const i of e.imports) push(m, i, f);
   return m;
 }
 
@@ -413,8 +493,10 @@ export function entryPoints(root: string, index: Index): string[] {
     }
   }
   const importers = importersOf(index);
-  // __init__.py runs when its package is imported, never on its own
-  for (const f of known) if (!importers.has(f) && !TEST.test(f) && !f.endsWith("__init__.py")) found.add(f);
+  // "nothing imports it" only means something where files import files. A .c/.cpp file is compiled, never included,
+  // and a Go/Java/C# file belongs to its package: those count only with a main. __init__.py runs when its package does.
+  const fileImports = (f: string) => ["ts", "py", "rs"].includes(langOf(f));
+  for (const f of known) if (!importers.has(f) && fileImports(f) && !TEST.test(f) && !f.endsWith("__init__.py")) found.add(f);
   // a file that runs on its own stays an entry point even when another file imports it back for its helpers
   for (const [f, e] of Object.entries(index.files)) {
     const hasMain = e.symbols.some(
@@ -425,6 +507,46 @@ export function entryPoints(root: string, index: Index): string[] {
   return [...found].sort();
 }
 
+const MAP_BUDGET = 40_000; // chars (~10k tokens): the map is read whole by agents, so a big repo gets a coarser one
+const ENTRY_LIMIT = 60;
+
+/** Modules section, one line per file, or per folder (first `depth` path parts) with the folders it depends on. */
+function modulesSection(index: Index, files: string[], depth?: number): string[] {
+  const lines: string[] = [];
+  if (depth === undefined) {
+    let dir: string | undefined;
+    for (const f of files) {
+      const d = posix.dirname(f);
+      if (d !== dir) lines.push("", `### ${d === "." ? "(root)" : d + "/"}`);
+      dir = d;
+      const e = index.files[f];
+      const deps = [...e.imports, ...e.external.map((x) => `pkg:${x}`)];
+      lines.push(`- \`${f}\`${deps.length ? ` → ${deps.join(", ")}` : ""}`);
+      const defs = e.symbols.filter((s) => !s.parent && s.kind !== "const");
+      if (defs.length) lines.push(`  - defines: ${defs.map((s) => (s.kind === "class" ? `class ${s.name}` : s.name)).join(", ")}`);
+    }
+    return lines;
+  }
+  const folderOf = new Map(files.map((f) => [f, posix.dirname(f).split("/").slice(0, depth).join("/").replace(/^\.$/, "(root)")]));
+  const groups = new Map<string, { files: number; deps: Map<string, number> }>();
+  for (const f of files) {
+    const own = folderOf.get(f)!;
+    const g = groups.get(own) ?? { files: 0, deps: new Map() };
+    groups.set(own, g);
+    g.files++;
+    const e = index.files[f];
+    for (const d of [...new Set(e.imports.map((i) => `${folderOf.get(i)}/`))].concat(e.external.map((x) => `pkg:${x}`)))
+      if (d !== `${own}/`) g.deps.set(d, (g.deps.get(d) ?? 0) + 1);
+  }
+  lines.push("", `_Grouped by folder (first ${depth} levels): this repo is too big to list every file. Ask \`get_context\` for a folder._`, "");
+  for (const [name, g] of [...groups].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    const top = [...g.deps].sort((a, b) => b[1] - a[1]).slice(0, 8).map(([d]) => d);
+    const more = g.deps.size > top.length ? `, +${g.deps.size - top.length} more` : "";
+    lines.push(`- \`${name}/\` (${g.files} files)${top.length ? ` → ${top.join(", ")}${more}` : ""}`);
+  }
+  return lines;
+}
+
 export function renderMap(root: string, index = loadIndex(root)): string {
   // by folder, then name, so each folder heading appears once (plain path order splits "main.py" from "config.py")
   const files = Object.keys(index.files).sort((a, b) => {
@@ -433,13 +555,15 @@ export function renderMap(root: string, index = loadIndex(root)): string {
   });
   const importers = importersOf(index);
   const notes = loadNotes(root);
+  const entries = entryPoints(root, index);
   const lines = [
     "# Codebase map",
     "",
     `_${files.length} source files. Generated by codemem; do not edit. Add notes with \`codemem note add\`._`,
     "",
     "## Entry points",
-    ...entryPoints(root, index).map((f) => `- \`${f}\``),
+    ...entries.slice(0, ENTRY_LIMIT).map((f) => `- \`${f}\``),
+    ...(entries.length > ENTRY_LIMIT ? [`- …and ${entries.length - ENTRY_LIMIT} more (files nothing imports)`] : []),
     "",
     "## Most depended-on",
     ...[...importers]
@@ -453,18 +577,22 @@ export function renderMap(root: string, index = loadIndex(root)): string {
       lines.push(`- #${n.id} [${n.kind}] ${n.title}${n.paths.length ? ` (${n.paths.join(", ")})` : ""}${staleMark(root, n)}`);
   }
   lines.push("", "## Modules");
-  let dir: string | undefined;
-  for (const f of files) {
-    const d = posix.dirname(f);
-    if (d !== dir) lines.push("", `### ${d === "." ? "(root)" : d + "/"}`);
-    dir = d;
-    const e = index.files[f];
-    const deps = [...e.imports, ...e.external.map((x) => `pkg:${x}`)];
-    lines.push(`- \`${f}\`${deps.length ? ` → ${deps.join(", ")}` : ""}`);
-    const defs = e.symbols.filter((s) => !s.parent && s.kind !== "const");
-    if (defs.length) lines.push(`  - defines: ${defs.map((s) => (s.kind === "class" ? `class ${s.name}` : s.name)).join(", ")}`);
+  const head = lines.join("\n");
+  // the most detail that fits: every file, else folders as deep as the budget allows (deeper = longer, so bisect)
+  const fits = (s: string) => head.length + s.length <= MAP_BUDGET;
+  // a file line is ~40+ chars, so past budget/40 files listing them all can't fit; don't build it
+  let body = files.length * 40 <= MAP_BUDGET ? modulesSection(index, files).join("\n") : "";
+  if (!body || !fits(body)) {
+    let [lo, hi] = [1, files.reduce((d, f) => Math.max(d, f.split("/").length - 1), 1)];
+    body = modulesSection(index, files, 1).join("\n");
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      const s = modulesSection(index, files, mid).join("\n");
+      if (fits(s)) [lo, body] = [mid, s];
+      else hi = mid - 1;
+    }
   }
-  return lines.join("\n") + "\n";
+  return `${head}\n${body}\n`;
 }
 
 export function writeMap(root: string, index?: Index): void {

@@ -5,10 +5,10 @@ Long-term memory for a codebase, so AI coding agents pick up its architecture wi
 - **Module map**: every TS/JS, Python, Go, Java, Rust, C/C++, and C# file with its resolved imports and packages, plus its entry points and most depended-on modules.
 - **Symbols**: the functions, classes, and methods each file defines, which names it takes from which file, and which of those each function calls, so you can ask where `ChurnPredictor` is defined and which functions use it.
 - **Notes**: architecture decisions, code conventions, and bugs that were already fixed, each attached to the files or folders it's about.
-- **Incremental**: only files whose content changed get re-parsed.
+- **Incremental**: unchanged files aren't even read (same modification time and size), only changed content is re-parsed, and after an edit only the files around it are re-resolved. Tested on Kubernetes, LLVM, MongoDB, VS Code, Next.js, Godot, Django, React and Express.
 - **Selective context**: an agent asks about a file, folder, or keyword and gets back only the relevant notes, plus those files with their imports and importers.
 
-Everything lives in `.codemem/` inside the target repo (`index.json`, `notes.json`, `map.md`). Commit it so every agent and teammate shares the same memory. Agents without MCP can simply read `.codemem/map.md`.
+Everything lives in `.codemem/` inside the target repo (`index.json`, `notes.json`, `map.md`). Commit `notes.json` (and `map.md` if you like) so every agent and teammate shares the same memory; `index.json` is a cache that rebuilds itself, and on a big repo it's 100MB+, so leave it out of git. Agents without MCP can simply read `.codemem/map.md`.
 
 Full installation and usage guide, with examples for every command: [docs/USAGE.md](docs/USAGE.md).
 
@@ -68,7 +68,9 @@ Or give Claude Code the full usage guide as a skill: `cp -r skills/codemem ~/.cl
 - Symbols: top-level functions, classes, methods, exported constants (TS/JS) and module CONSTANTS (Python). Calls are matched by name, so a method called through an instance (`obj.train()`) is not tracked; a default import or `module.exports = expr` is matched by its local name / the file name.
 - Python: imports and symbols are found by regex, and absolute imports are looked up from the importing file's folder up to the repo root (so a service folder like `ml-service/` works as its own source root), then `src/`.
 - TS/JS aliases: `paths` and `baseUrl` from every `tsconfig*.json` / `jsconfig.json` are applied to files under that config's folder; `extends` is not followed.
-- `context`, `symbol`, `read` and the MCP tools re-hash every file before answering (only changed ones are re-parsed), which may get slow on very large repos. `codemem watch` is the opt-in file watcher.
+- `context`, `symbol`, `read` and the MCP tools re-index before answering. With nothing changed that's a check of every file's modification time: about 1–2 s on Kubernetes (14k files), 6–9 s on LLVM (77k). After an edit the whole index file is rewritten, which costs more on huge repos (about 5 s on Kubernetes, 14 s on LLVM). `codemem watch` is the opt-in file watcher.
+- Skipped: build output (`dist`, `build`, `target`, `obj`) and vendored dependencies (`vendor`, `third_party`, `thirdparty`, `3rdparty`), besides whatever `.gitignore` excludes.
+- Big repos: when listing every file would make `map.md` longer than about 40,000 characters, its Modules section lists folders instead (as deep as fits), and Entry points shows the first 60.
 
 ## Develop
 
