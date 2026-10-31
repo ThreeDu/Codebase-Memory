@@ -14,14 +14,18 @@ Full installation and usage guide, with examples for every command: [docs/USAGE.
 
 ## Install
 
+From npm (gives you the `codemem` command):
+
 ```bash
-npm install && npm run build
+npm install -g @threedu/codebase-memory
 ```
+
+Or without installing, `npx -y @threedu/codebase-memory <command>`. Also possible: straight from GitHub with `npm install -g github:ThreeDu/Codebase-Memory`, or from a clone with `npm install` (builds too) then `npm link`. Needs Node.js 20+.
 
 ## CLI
 
 ```bash
-node dist/src/cli.js index path/to/repo
+codemem index path/to/repo
 ```
 
 | Command | What it does |
@@ -31,6 +35,7 @@ node dist/src/cli.js index path/to/repo
 | `context <file\|folder\|symbol\|keyword> [--budget N]` | Focused context, cut at N chars (default 8000) |
 | `symbol <name\|Class.method>` | Where a function/class is defined and which files and functions use it |
 | `read <name\|Class.method>` | Print just that function/class/method's source, with its line range |
+| `search <words...> [--limit N]` | Find functions/classes/methods by a rough name or a few words (`payment webhook`, `parseConfig`) |
 | `note add --kind decision\|convention\|fix [--paths a,b] "<title>" ["<body>"]` | Save a note |
 | `note edit <id> [--kind K] [--title T] [--body B] [--paths a,b]` | Change only the given fields of a note |
 | `note rm <id>` | Delete a note |
@@ -39,7 +44,7 @@ node dist/src/cli.js index path/to/repo
 | `watch` | Keep `map.md` and `graph.html` updated as code changes (refresh the browser to see it) |
 | `mcp` | Run as an MCP server on stdio |
 
-All commands accept `--root <dir>` (default: the current directory). After `npm link` you can call the CLI as `codemem`.
+All commands accept `--root <dir>` (default: the current directory). From a clone without `npm link`, run `node dist/src/cli.js` instead of `codemem`.
 
 ## Graph view
 
@@ -47,15 +52,17 @@ All commands accept `--root <dir>` (default: the current directory). After `npm 
 
 ## Use from Claude Code (MCP)
 
+With `codemem` installed:
+
 ```bash
-claude mcp add codemem -- node /path/to/Codebase-Memory/dist/src/cli.js mcp --root .
+claude mcp add codemem -- codemem mcp --root .
 ```
 
-Replace `/path/to/Codebase-Memory` with where you cloned this repo (e.g. `C:/tools/Codebase-Memory` or `~/tools/Codebase-Memory`). After `npm link` you can skip the path: `claude mcp add codemem -- codemem mcp --root .` (on Windows: `-- cmd /c codemem mcp --root .`).
+On Windows use `-- cmd /c codemem mcp --root .`. Without installing anything: `-- npx -y @threedu/codebase-memory mcp --root .` (Windows: `-- cmd /c npx -y @threedu/codebase-memory mcp --root .`). From a clone: `-- node /path/to/Codebase-Memory/dist/src/cli.js mcp --root .`. Other MCP clients (Cursor, Codex, Gemini CLI, ...) run the same command; see [docs/USAGE.md](docs/USAGE.md#using-it-from-ai-agents-mcp).
 
-Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `read_symbol`, `add_note`, `update_note`, `remove_note`. A good line for the target repo's `CLAUDE.md`/`AGENTS.md`:
+Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `search_symbols`, `read_symbol`, `add_note`, `update_note`, `remove_note`. Several agents (or an agent and `codemem watch`) can use one repo at once: files are written atomically and notes under a lock. A good line for the target repo's `CLAUDE.md`/`AGENTS.md`:
 
-> Before working on an area, call `get_context` for it; read a single function with `read_symbol` instead of the whole file. Record decisions, conventions, and non-obvious bug fixes with `add_note`; fix or remove notes marked `⚠ missing` or no longer true.
+> Before working on an area, call `get_context` for it; find code by a rough name with `search_symbols`, and read a single function with `read_symbol` instead of the whole file. Record decisions, conventions, and non-obvious bug fixes with `add_note`; fix or remove notes marked `⚠ missing` or no longer true.
 
 Or give Claude Code the full usage guide as a skill: `cp -r skills/codemem ~/.claude/skills/` (see [docs/USAGE.md](docs/USAGE.md#or-install-the-skill-claude-code)).
 

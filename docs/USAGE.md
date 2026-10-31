@@ -23,27 +23,35 @@ Supported source files: TypeScript / JavaScript (`.ts .tsx .mts .cts .js .jsx .m
 
 ## Installation
 
-1. Get the code and install dependencies:
+Install from npm; it puts the `codemem` command on your PATH:
+
+```bash
+npm install -g @threedu/codebase-memory
+```
+
+To try it without installing, prefix commands with `npx -y @threedu/codebase-memory` instead of `codemem`. The latest unreleased code installs straight from GitHub (it builds during install):
+
+```bash
+npm install -g github:ThreeDu/Codebase-Memory
+```
+
+Or from a clone, if you want to change the code:
+
+1. Get the code; `npm install` also builds it:
 
    ```bash
-   git clone <this-repo-url> Codebase-Memory
+   git clone https://github.com/ThreeDu/Codebase-Memory
    cd Codebase-Memory
    npm install
    ```
 
-2. Build it:
-
-   ```bash
-   npm run build
-   ```
-
-3. Make the `codemem` command available everywhere (optional, recommended):
+2. Make the `codemem` command available everywhere (optional, recommended):
 
    ```bash
    npm link
    ```
 
-4. Check that it works. Running it with no command prints the usage:
+Check that it works. Running it with no command prints the usage:
 
    ```bash
    codemem
@@ -57,6 +65,7 @@ Supported source files: TypeScript / JavaScript (`.ts .tsx .mts .cts .js .jsx .m
      context <file|folder|symbol|keyword> [--budget N]
      symbol <name|Class.method>           where it is defined and who uses it
      read <name|Class.method>             print its source code
+     search <words...> [--limit N]        find functions/classes by rough name ("payment webhook")
      note add --kind <decision|convention|fix> [--paths a,b] "<title>" ["<body>"]
      note edit <id> [--kind K] [--title T] [--body B] [--paths a,b]
      note rm <id>
@@ -221,6 +230,22 @@ export function greet(name: string) {
 
 Prints only that function, class, or method with its file and line range, so you (or an agent) don't have to open the whole file. If several files define the same name, each one is printed.
 
+### `search <words...>`: find something when you don't know its exact name
+
+```bash
+codemem search payment webhook
+codemem search parseConfig --limit 5
+```
+
+```markdown
+# Search: payment webhook (2 matches)
+
+- function `handlePaymentWebhook` at `server/payments.ts:1` (exported)
+- function `paymentWebhookUrl` at `server/orders.ts:2` (exported)
+```
+
+Names are split into words (`handlePaymentWebhook`, `handle_payment_webhook`), and every word you give must match one, exactly, as a prefix either way (`handler` finds `handle`), or inside it. For a method, its class's words count too, at half weight. Exact names come first, then names with your words side by side, then the rest; the file path breaks ties. Default 20 results; `--limit` changes that.
+
 ### `note add`: remember a decision, convention, or fix
 
 ```bash
@@ -322,10 +347,10 @@ You normally don't run this yourself. Your AI tool starts it; see the next secti
 Register it once for all your projects:
 
 ```bash
-claude mcp add -s user codemem -- node /path/to/Codebase-Memory/dist/src/cli.js mcp --root .
+claude mcp add -s user codemem -- codemem mcp --root .
 ```
 
-Replace the path with where you installed Codebase Memory. `--root .` means "the project Claude Code is opened in". To register it for one project only, run the command inside that project without `-s user`.
+On Windows: `-- cmd /c codemem mcp --root .`. Without installing: `-- npx -y @threedu/codebase-memory mcp --root .` (Windows: `-- cmd /c npx -y @threedu/codebase-memory mcp --root .`). From a clone without `npm link`: `-- node /path/to/Codebase-Memory/dist/src/cli.js mcp --root .`. `--root .` means "the project Claude Code is opened in". To register it for one project only, run the command inside that project without `-s user`.
 
 ### Other MCP clients (Cursor, Claude Desktop, ...)
 
@@ -335,8 +360,8 @@ Add this to the client's MCP configuration:
 {
   "mcpServers": {
     "codemem": {
-      "command": "node",
-      "args": ["/path/to/Codebase-Memory/dist/src/cli.js", "mcp", "--root", "/path/to/your-project"]
+      "command": "codemem",
+      "args": ["mcp", "--root", "/path/to/your-project"]
     }
   }
 }
@@ -352,6 +377,7 @@ Use an absolute `--root` unless you know the client starts servers inside the pr
 | `get_map` | none | The project overview (same as `codemem map`) |
 | `get_context` | `target`, optional `budget` | Same as `codemem context` |
 | `find_symbol` | `name` (`name` or `Class.method`) | Same as `codemem symbol` |
+| `search_symbols` | `query`, optional `limit` | Same as `codemem search` |
 | `read_symbol` | `name` (`name` or `Class.method`) | Same as `codemem read` |
 | `add_note` | `kind`, `title`, optional `body`, `paths` | Saves a note |
 | `update_note` | `id`, optional `kind`, `title`, `body`, `paths` | Same as `codemem note edit` |
@@ -364,7 +390,7 @@ Add this to the project's `CLAUDE.md` or `AGENTS.md`:
 ```markdown
 ## Codebase memory
 - Before working on an area, call `get_context` for the file, folder, or function you are about to change.
-- To find where something is defined or who uses it, call `find_symbol` instead of searching.
+- To find where something is defined or who uses it, call `find_symbol` instead of searching; if you only know roughly what it's called, `search_symbols` first.
 - To read a function, call `read_symbol` instead of opening the whole file.
 - When you make an architecture decision, establish a convention, or fix a non-obvious bug, record it with `add_note` (attach the paths).
 - If a note is marked `⚠ missing` or no longer true, fix it with `update_note` or delete it with `remove_note`.
@@ -397,6 +423,9 @@ Everything is inside `.codemem/` in the indexed project:
 | `notes.json` | Your notes | **Yes**: this is the knowledge you can't regenerate |
 | `map.md` | Generated overview | Yes, so agents without MCP can read it |
 | `graph.html` | Generated graph page | Optional: it's large and regenerated on every `graph` run; add `.codemem/graph.html` to `.gitignore` if you prefer |
+| `*.tmp`, `notes.json.lock` | Exist for a moment while a file is written or a note saved | No; add `.codemem/*.tmp` and `.codemem/*.lock` to `.gitignore`. A `.lock` older than 10 seconds is from a process that crashed and is removed automatically |
+
+Several agents, or an agent plus `codemem watch`, can use the same project at once: every file is written to a temp file and renamed into place, so nobody reads half a file, and notes are changed under a lock, so two agents adding notes at the same moment both keep theirs. A damaged `index.json` is simply rebuilt; a damaged `notes.json` is reported and left untouched, since rebuilding it would lose your notes.
 
 All files are plain JSON/Markdown and safe to delete. `codemem index` rebuilds everything except `notes.json`.
 
@@ -414,7 +443,7 @@ All files are plain JSON/Markdown and safe to delete. `codemem index` rebuilds e
 |---|---|
 | `No index yet. Run codemem index...` | The project hasn't been indexed. Run `codemem index` in it (or with `--root`) |
 | `codemem: command not found` | `npm link` wasn't run, or the npm global folder isn't on your PATH. Use `node <path>/dist/src/cli.js` instead |
-| A positional argument is ignored | Every `--flag` takes the next word as its value. Put `--no-open` last: `codemem graph --root x --no-open` |
+| A positional argument is ignored | A `--flag` takes the next word as its value unless that word is another `--flag`. So `codemem note add --kind fix "title"` works, but `--kind` with nothing after it before the title would eat the title: put the title after all flags' values |
 | `codemem: kind must be one of: decision, convention, fix` | `--kind` is missing or misspelled in `note add` |
 | Results look stale | `context`, `symbol`, `read` and the MCP tools re-index first; `map` and `graph.html` update on `codemem index` or while `codemem watch` runs |
 | Go package or Java/Rust import shows as a package | Go: the import must start with the `module` path of a `go.mod` in the repo. Java: the folders must match the package (`com/shop/User.java` for `com.shop.User`). Rust: only `mod x;` files (`x.rs` or `x/mod.rs`) are followed, not `#[path]` |

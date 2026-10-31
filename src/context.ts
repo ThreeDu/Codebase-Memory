@@ -60,6 +60,59 @@ export function readSymbol(root: string, name: string): string {
     .join("\n\n");
 }
 
+/** "handlePaymentWebhook", "handle_payment_webhook", "HTTPServer" -> ["handle", "payment", "webhook"], ["http", "server"] */
+const words = (s: string) =>
+  s
+    .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+
+/** Functions, classes and methods matching a rough name or a few words ("payment webhook", "parseConfig"), best first.
+ * Every query word must match a word of the name or its class (exactly, as a prefix either way, or inside it); file path
+ * words only add weight. For when the exact name isn't known; find_symbol / read_symbol take it from there. */
+export function searchSymbols(root: string, query: string, limit = 20): string {
+  const index = fresh(root);
+  const q = words(query);
+  if (!q.length) return "Give a name or a few words to search for.";
+  const whole = q.join("");
+  const hits: { score: number; label: string; at: string; s: Sym }[] = [];
+  for (const [f, e] of Object.entries(index.files)) {
+    let path: string[] | undefined; // only split when a name matched, most never do
+    for (const s of e.symbols) {
+      const label = s.parent ? `${s.parent}.${s.name}` : s.name;
+      const own = words(s.name);
+      const cls = s.parent ? words(s.parent) : [];
+      const fit = (n: string, w: string) => (n === w ? 3 : n.startsWith(w) || (n.length >= 3 && w.startsWith(n)) ? 2 : n.includes(w) ? 1 : 0);
+      let score = 0;
+      for (const w of q) {
+        // a word in the method's own name counts fully; only in its class's name, half
+        const best = Math.max(0, ...own.map((n) => fit(n, w))) || Math.max(0, ...cls.map((n) => fit(n, w))) / 2;
+        if (!best) {
+          score = 0;
+          break;
+        }
+        score += best;
+      }
+      if (!score) continue;
+      if (own.join("") === whole || [...cls, ...own].join("") === whole) score += 10; // the exact name
+      // the query's words side by side, in order: "pod eviction" -> podEvictionTime over evictPodForNode
+      const at = own.findIndex((n) => fit(n, q[0]) >= 2);
+      if (q.length > 1 && at >= 0 && q.every((w, i) => own[at + i] !== undefined && fit(own[at + i], w) >= 2)) score += 3;
+      path ??= words(f);
+      score += q.filter((w) => path!.includes(w)).length * 0.5;
+      hits.push({ score, label, at: `${f}:${s.line}`, s });
+    }
+  }
+  if (!hits.length) return `No function, class or method matches \`${query}\`.`;
+  // best score; then top-level before methods, shorter names, path order
+  hits.sort((a, b) => b.score - a.score || +!!a.s.parent - +!!b.s.parent || a.label.length - b.label.length || (a.at < b.at ? -1 : 1));
+  const shown = hits.slice(0, limit).map(({ label, at, s }) => `- ${s.kind} \`${label}\` at \`${at}\`${s.exported ? " (exported)" : ""}`);
+  const more = hits.length > limit ? [`…and ${hits.length - limit} more; add a word to narrow it.`] : [];
+  return [`# Search: ${query} (${hits.length} match${hits.length === 1 ? "" : "es"})`, "", ...shown, ...more].join("\n");
+}
+
 /**
  * Selective context for one task: target is a file, a folder, a symbol name, or a keyword.
  * Returns the matching notes plus the matched files with their symbols and 1-hop neighbours, cut to `budget` chars.

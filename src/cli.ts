@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { watch } from "node:fs";
 import { resolve } from "node:path";
-import { context, findSymbol, readSymbol } from "./context.js";
+import { context, findSymbol, readSymbol, searchSymbols } from "./context.js";
 import { writeGraph } from "./graph.js";
 import { isSource, renderMap, update, writeMap } from "./index.js";
 import { serve } from "./mcp.js";
@@ -15,6 +15,7 @@ const USAGE = `codemem <command> [--root <dir>]
   context <file|folder|symbol|keyword> [--budget N]
   symbol <name|Class.method>           where it is defined and who uses it
   read <name|Class.method>             print its source code
+  search <words...> [--limit N]        find functions/classes by rough name ("payment webhook")
   note add --kind <${KINDS.join("|")}> [--paths a,b] "<title>" ["<body>"]
   note edit <id> [--kind K] [--title T] [--body B] [--paths a,b]
   note rm <id>
@@ -23,12 +24,12 @@ const USAGE = `codemem <command> [--root <dir>]
   watch                                keep map.md and graph.html updated as code changes
   mcp                                  run the MCP server on stdio`;
 
-// split "--name value" flags from positional args
+// split "--name value" flags from positional args; a flag followed by another flag (--no-open --root x) has no value
 const flags: Record<string, string> = {};
 const args: string[] = [];
 const argv = process.argv.slice(2);
 for (let i = 0; i < argv.length; i++) {
-  if (argv[i].startsWith("--")) flags[argv[i].slice(2)] = argv[++i] ?? "";
+  if (argv[i].startsWith("--")) flags[argv[i].slice(2)] = argv[i + 1]?.startsWith("--") ? "" : (argv[++i] ?? "");
   else args.push(argv[i]);
 }
 const [cmd, ...rest] = args;
@@ -46,6 +47,8 @@ try {
     console.log(findSymbol(root, rest[0]));
   } else if (cmd === "read" && rest[0]) {
     console.log(readSymbol(root, rest[0]));
+  } else if (cmd === "search" && rest[0]) {
+    console.log(searchSymbols(root, rest.join(" "), flags.limit ? Number(flags.limit) : undefined));
   } else if (cmd === "note" && rest[0] === "add") {
     const note = addNote(root, { kind: flags.kind, title: rest[1], body: rest[2], paths: flags.paths?.split(",") });
     writeMap(root);

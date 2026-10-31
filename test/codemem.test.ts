@@ -3,7 +3,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, write
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { context, findSymbol, readSymbol } from "../src/context.js";
+import { context, findSymbol, readSymbol, searchSymbols } from "../src/context.js";
 import { writeGraph } from "../src/graph.js";
 import { definedIn, entryPoints, isSource, renderMap, resolvedCalls, update } from "../src/index.js";
 import { addNote, loadNotes, removeNote, updateNote, type Note } from "../src/notes.js";
@@ -333,6 +333,27 @@ test("resolves tsconfig paths and jsconfig baseUrl aliases", () => {
   assert.deepEqual(index.files["src/app.ts"].external, ["react"]); // "@/missing" is ours, just missing; "*" doesn't swallow react
   assert.deepEqual(index.files["web/src/index.js"].imports, ["web/src/components/Card.js"]);
   assert.deepEqual(index.files["web/src/index.js"].external, ["axios"]);
+});
+
+test("searches symbols by rough name or words", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codemem-"));
+  const put = (f: string, src: string) => {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), src);
+  };
+  put("server/payments.ts", `export function handlePaymentWebhook() {}\nexport class PaymentService {\n  refund() {}\n}\n`);
+  put("server/orders.ts", `export function listOrders() {}\nexport function paymentWebhookUrl() {}\n`);
+  put("ml/config.py", `def parse_config(path):\n    return path\n`);
+  const lines = (q: string) => searchSymbols(dir, q).split("\n").filter((l) => l.startsWith("- "));
+  // every word must match; "handler" finds "handle"; the closer name ranks first
+  assert.deepEqual(lines("payment webhook handler"), ["- function `handlePaymentWebhook` at `server/payments.ts:1` (exported)"]);
+  assert.match(lines("payment webhook")[0], /handlePaymentWebhook|paymentWebhookUrl/);
+  assert.equal(lines("payment webhook").length, 2);
+  assert.match(lines("parseConfig")[0], /function `parse_config` at `ml\/config.py:1`/); // camelCase query, snake_case name
+  assert.match(lines("payment refund")[0], /method `PaymentService.refund`/); // the class name counts for a method
+  assert.match(lines("PaymentService")[0], /class `PaymentService`/); // exact name first, before its methods
+  assert.match(searchSymbols(dir, "invoice"), /No function, class or method matches `invoice`/);
+  assert.match(searchSymbols(dir, "pay", 1), /…and \d+ more/);
 });
 
 test("watch reacts only to indexed source files", () => {

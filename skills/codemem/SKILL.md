@@ -9,15 +9,15 @@ codemem keeps a map of this repo (files, imports, entry points, functions/classe
 
 ## Which interface
 
-- **MCP tools** (`get_map`, `get_context`, `find_symbol`, `read_symbol`, `add_note`, `update_note`, `remove_note`): use these when they are available. They re-index changed files before answering, so you never need to call `reindex` yourself.
-- **CLI** when the tools are not available: `codemem <command>` (or `node <path-to>/Codebase-Memory/dist/src/cli.js <command>`), same names: `map`, `context`, `symbol`, `read`, `note add|edit|rm|list`.
+- **MCP tools** (`get_map`, `get_context`, `find_symbol`, `search_symbols`, `read_symbol`, `add_note`, `update_note`, `remove_note`): use these when they are available. They re-index changed files before answering, so you never need to call `reindex` yourself.
+- **CLI** when the tools are not available: `codemem <command>` (or `node <path-to>/Codebase-Memory/dist/src/cli.js <command>`), same names: `map`, `context`, `symbol`, `search`, `read`, `note add|edit|rm|list`.
 - **Neither**: read `.codemem/map.md` directly.
 
 ## Workflow
 
 1. **New to the repo**: `get_map` once. It lists entry points, the most depended-on modules, all notes, and every module with its imports and definitions. Don't call it again in the same task.
 2. **Before working on an area**: `get_context` with the file, folder, function name, or keyword (e.g. `src/auth`, `useAuth`, `payment`). Read the notes it returns first: they are decisions and past fixes you must respect. Pass `budget` to get more when the output says it was truncated, or narrow the target.
-3. **Where is X / who uses X**: `find_symbol` with `name` or `Class.method`, instead of grepping. Check every "used by" entry before changing a signature.
+3. **Where is X / who uses X**: `find_symbol` with `name` or `Class.method`, instead of grepping. Check every "used by" entry before changing a signature. Only know roughly what it's called ("the payment webhook handler")? `search_symbols` with a few words first, then `find_symbol` on the name it gives.
 4. **Read code**: `read_symbol` with `name` or `Class.method` returns only that definition with its `file:start-end` range. Open the whole file only when you need more than one or two of its functions, or are about to edit it.
 5. **After the task**, record what the next agent can't see from the code (one note per fact, attach `paths`):
    - `decision`: an architecture choice and why ("Auth tokens live in httpOnly cookies, not localStorage, because of XSS").

@@ -1,14 +1,17 @@
+import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { context, findSymbol, readSymbol } from "./context.js";
+import { context, findSymbol, readSymbol, searchSymbols } from "./context.js";
 import { renderMap, update, writeMap } from "./index.js";
 import { addNote, KINDS, removeNote, updateNote } from "./notes.js";
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
 export async function serve(root: string): Promise<void> {
-  const server = new McpServer({ name: "codebase-memory", version: "0.1.0" });
+  // dist/src/mcp.js -> the package's own package.json, so clients see the installed version
+  const { version } = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8"));
+  const server = new McpServer({ name: "codebase-memory", version });
 
   server.registerTool(
     "reindex",
@@ -48,6 +51,19 @@ export async function serve(root: string): Promise<void> {
       inputSchema: { name: z.string().min(1) },
     },
     async ({ name }) => text(findSymbol(root, name)),
+  );
+
+  server.registerTool(
+    "search_symbols",
+    {
+      description:
+        "Find functions, classes and methods when you don't know the exact name: a rough name or a few words, e.g. 'payment webhook', 'parseConfig', 'user repo'. Returns the best matches with file:line; follow up with find_symbol or read_symbol.",
+      inputSchema: {
+        query: z.string().min(1),
+        limit: z.number().int().positive().max(200).optional().describe("Max results (default 20)"),
+      },
+    },
+    async ({ query, limit }) => text(searchSymbols(root, query, limit)),
   );
 
   server.registerTool(

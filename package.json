@@ -1,19 +1,45 @@
 {
-  "name": "codebase-memory",
-  "version": "0.1.0",
+  "name": "@threedu/codebase-memory",
+  "version": "0.2.0",
   "description": "Long-term codebase memory for AI coding agents: module map, entry points, and notes, served over CLI and MCP.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "code-index",
+    "codebase",
+    "claude-code",
+    "cursor"
+  ],
+  "author": "Khang",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ThreeDu/Codebase-Memory.git"
+  },
+  "homepage": "https://github.com/ThreeDu/Codebase-Memory#readme",
+  "bugs": "https://github.com/ThreeDu/Codebase-Memory/issues",
   "type": "module",
   "bin": {
     "codemem": "dist/src/cli.js"
   },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/src",
+    "skills",
+    "docs"
+  ],
   "scripts": {
     "build": "tsc",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm test",
     "test": "npm run build && node --test dist/test/*.test.js"
   },
   "engines": {
     "node": ">=20"
   },
-  "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "typescript": "~5.9",
