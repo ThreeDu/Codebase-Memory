@@ -216,6 +216,54 @@ test("reads Rust: mod, use (groups, as, super, re-exports), impl methods", () =>
   assert.match(readSymbol(rs, "Order.total"), /mod.rs:14-16`/);
 });
 
+test("reads C: includes, header -> source pairs, prototypes vs definitions", () => {
+  const c = copyFixture("csample");
+  const { index } = update(c);
+  // "../include/util.h" by path; "util.h" from src/ found like an include dir; util.c implements what main calls
+  assert.deepEqual(index.files["src/main.c"].imports, ["include/util.h", "src/util.c"]);
+  assert.deepEqual(index.files["src/main.c"].external, ["stdio.h"]);
+  assert.deepEqual(index.files["src/util.c"].imports, ["include/util.h"]);
+  assert.deepEqual(entryPoints(c, index), ["src/main.c"]); // util.c is used through its header
+  assert.deepEqual(index.files["include/util.h"].symbols, []); // prototypes (one spans two lines) only declare
+  assert.deepEqual(kinds(index, "src/util.c"), [["function", "helper", 4, 4], ["function", "add", 6, 9], ["function", "twice", 11, 14]]);
+  assert.equal(index.files["src/util.c"].symbols[0].exported, false); // static
+  assert.deepEqual(callsOf(index, "src/main.c", "main"), ["twice@src/util.c"]);
+});
+
+test("reads C++: classes in a namespace, Class::method definitions", () => {
+  const cpp = copyFixture("cppsample");
+  const { index } = update(cpp);
+  assert.deepEqual(index.files["src/main.cpp"].imports, ["include/shapes/Shape.hpp", "src/Shape.cpp"]);
+  assert.deepEqual(index.files["src/main.cpp"].external, ["iostream", "memory"]);
+  assert.deepEqual(entryPoints(cpp, index), ["src/main.cpp"]);
+  // `public:` at the class's indent doesn't end it; constructor, destructor, pure virtual, inline body
+  assert.deepEqual(kinds(index, "include/shapes/Shape.hpp"), [
+    ["class", "Shape", 6, 15], ["method", "Shape.Shape", 8, 8], ["method", "Shape.~Shape", 9, 9],
+    ["method", "Shape.area", 10, 10], ["method", "Shape.name", 11, 11],
+    ["class", "Circle", 17, 24], ["method", "Circle.Circle", 19, 19], ["method", "Circle.area", 20, 20],
+  ]);
+  assert.deepEqual(kinds(index, "src/Shape.cpp"), [["method", "Shape.Shape", 5, 5], ["method", "Circle.Circle", 7, 7], ["method", "Circle.area", 9, 11]]);
+  assert.match(findSymbol(cpp, "Circle.area"), /Shape.hpp:20`[\s\S]*Shape.cpp:9`/); // declared and defined
+});
+
+test("reads C#: namespaces across files, usings, block and file-scoped namespaces", () => {
+  const cs = copyFixture("cssample");
+  const { index } = update(cs);
+  assert.deepEqual(index.files["Program.cs"].imports, ["Services/OrderService.cs"]); // `using Shop.Services`
+  assert.deepEqual(index.files["Services/OrderService.cs"].imports, ["Models/Order.cs"]);
+  assert.deepEqual(index.files["Services/OrderService.cs"].external, ["System.Linq"]);
+  assert.deepEqual(index.files["Shop.Tests/OrderServiceTests.cs"].external, ["Xunit"]);
+  assert.deepEqual(entryPoints(cs, index), ["Program.cs"]); // Main; Shop.Tests/ is a test project
+  assert.deepEqual(kinds(index, "Program.cs"), [["class", "Program", 5, 12], ["method", "Program.Main", 7, 11]]); // inside `namespace Shop { }`
+  // a field initializer and an attribute aren't methods; constructor, expression body, async generic return are
+  assert.deepEqual(kinds(index, "Services/OrderService.cs"), [
+    ["class", "OrderService", 6, 19], ["method", "OrderService.OrderService", 10, 10],
+    ["method", "OrderService.Total", 12, 12], ["method", "OrderService.TotalAsync", 15, 18],
+  ]);
+  assert.deepEqual(kinds(index, "Models/Order.cs"), [["class", "Order", 3, 3], ["class", "Helper", 5, 7]]);
+  assert.match(findSymbol(cs, "OrderService"), /used by `Program.cs` in: Program, Program.Main/);
+});
+
 test("handles patterns found in real repos", () => {
   const dir = mkdtempSync(join(tmpdir(), "codemem-"));
   const put = (f: string, src: string) => {
@@ -240,6 +288,28 @@ test("handles patterns found in real repos", () => {
   assert.equal(renderMap(dir, index).match(/^### \(root\)$/gm)?.length, 1);
 });
 
+test("resolves tsconfig paths and jsconfig baseUrl aliases", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codemem-"));
+  const put = (f: string, src: string) => {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), src);
+  };
+  // Next/Vite style: "@/*" -> "src/*", in a config with comments and a trailing comma
+  put("tsconfig.json", `{\n  // aliases\n  "compilerOptions": { "paths": { "@/*": ["./src/*"], "~ui": ["src/ui/index.ts"], "*": ["src/*"] }, },\n}\n`);
+  put("src/lib/util.ts", `export const util = 1;\n`);
+  put("src/ui/index.ts", `export const Button = 1;\n`);
+  put("src/app.ts", `import { util } from "@/lib/util";\nimport { Button } from "~ui";\nimport { gone } from "@/missing";\nimport React from "react";\n`);
+  // CRA style in a subfolder: bare imports from baseUrl
+  put("web/jsconfig.json", `{ "compilerOptions": { "baseUrl": "src" } }`);
+  put("web/src/components/Card.js", `export default function Card() {}\n`);
+  put("web/src/index.js", `import Card from "components/Card";\nimport axios from "axios";\n`);
+  const { index } = update(dir);
+  assert.deepEqual(index.files["src/app.ts"].imports, ["src/lib/util.ts", "src/ui/index.ts"]);
+  assert.deepEqual(index.files["src/app.ts"].external, ["react"]); // "@/missing" is ours, just missing; "*" doesn't swallow react
+  assert.deepEqual(index.files["web/src/index.js"].imports, ["web/src/components/Card.js"]);
+  assert.deepEqual(index.files["web/src/index.js"].external, ["axios"]);
+});
+
 test("watch reacts only to indexed source files", () => {
   assert.ok(isSource("src\\lib\\greet.ts")); // Windows separators from fs.watch
   assert.ok(isSource("svc/app.py"));
@@ -256,4 +326,7 @@ test("writes the graph page with embedded data", () => {
   assert.match(html, /"entry":true/);
   // the note's "</script>" is escaped, so closing tags match the page's own opening tags
   assert.equal(html.match(/<\/script>/g)?.length, html.match(/<script/g)?.length);
+  // a note about a deleted file carries its warning into the page
+  addNote(root, { kind: "decision", title: "Old file rule", paths: ["src/deleted.ts"] });
+  assert.match(readFileSync(writeGraph(root), "utf8"), /"title":"Old file rule"[^}]*"stale":"⚠ missing: src\/deleted.ts"/);
 });

@@ -28,8 +28,8 @@ codemem keeps a map of this repo (files, imports, entry points, functions/classe
 
 ## Limits: when to fall back to grep / reading files
 
-- Indexed: TS/JS, Python, Go, Java, Rust. Other languages, config, SQL, CSS: use normal search.
-- Go/Java/Rust are read by regex: if a `read_symbol` range looks cut short or too long, open the file at that line.
+- Indexed: TS/JS, Python, Go, Java, Rust, C/C++, C#. Other languages, config, SQL, CSS: use normal search.
+- Everything but TS/JS is read by regex: if a `read_symbol` range looks cut short or too long, open the file at that line.
+- C/C++: a function can show up twice (declared in the class in the header, defined in the .cpp); the one with a body is in the source file.
 - Method calls through an instance (`obj.train()`) are not tracked, so `find_symbol` may miss callers of a method. Grep for `.methodName(` before changing a method.
-- tsconfig `paths` aliases (`@/lib/x`) appear as packages, not as file imports.
 - Dynamic lookups (string-built imports, `getattr`, reflection) are invisible to it.

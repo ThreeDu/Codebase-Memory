@@ -1,7 +1,7 @@
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { entryPoints, importersOf, resolvedCalls, STORE, update } from "./index.js";
-import { loadNotes } from "./notes.js";
+import { loadNotes, staleMark } from "./notes.js";
 
 /** Re-index, then write a self-contained interactive dependency graph to .codemem/graph.html. */
 export function writeGraph(root: string): string {
@@ -18,7 +18,7 @@ export function writeGraph(root: string): string {
       uses: e.uses,
       symbols: e.symbols.map(({ calls, ...s }) => ({ ...s, calls: resolvedCalls(index, path, calls) })),
     })),
-    notes: loadNotes(root),
+    notes: loadNotes(root).map((n) => ({ ...n, stale: staleMark(root, n).trim() })),
   };
   const out = join(root, STORE, "graph.html");
   // "<" escaped so file names or notes can't close the <script> tag
@@ -49,6 +49,8 @@ const PAGE = `<!doctype html>
   aside a { color:var(--accent); cursor:pointer; word-break:break-all; }
   .note { border-left:3px solid var(--accent); padding:4px 8px; margin:6px 0; white-space:pre-wrap; }
   .note b { display:block; }
+  .note.stale { border-left-color:var(--entry); }
+  .warn { color:var(--entry); }
   .muted { color:var(--muted); }
   .legend span { display:inline-block; width:10px; height:10px; border-radius:50%; border:2px solid var(--entry); vertical-align:middle; margin-right:4px; }
   @media (max-width: 720px) { body { grid-template-columns:1fr; grid-template-rows:auto 1fr 40vh; } aside { border-left:0; border-top:1px solid var(--line); } header input { width:100%; } }
@@ -97,7 +99,9 @@ for (const f of DATA.files) {
     edges++;
   }
 }
-document.getElementById("stats").textContent = DATA.files.length + " files · " + edges + " imports · " + DATA.notes.length + " notes";
+const staleNotes = DATA.notes.filter((n) => n.stale);
+document.getElementById("stats").textContent = DATA.files.length + " files · " + edges + " imports · " + DATA.notes.length + " notes" +
+  (staleNotes.length ? " · " + staleNotes.length + " ⚠ out of date" : "");
 
 const cy = cytoscape({
   container: document.getElementById("cy"),
@@ -141,8 +145,11 @@ function symbolsHtml(f) {
   const subList = (ms) => ms.length ? "<ul>" + ms.map(item).join("") + "</ul>" : "";
   return "<h3>Defines (" + top.length + ")</h3><ul>" + top.map(item).join("") + "</ul>";
 }
-const notesHtml = (notes) => notes.length ? "<h3>Notes</h3>" + notes.map((n) =>
-  '<div class="note"><b>[' + esc(n.kind) + "] " + esc(n.title) + "</b>" + esc(n.body) + '<div class="muted">' + esc(n.date) + "</div></div>").join("") : "";
+const notesHtml = (notes, title = "Notes") => notes.length ? "<h3>" + title + "</h3>" + notes.map((n) =>
+  '<div class="note' + (n.stale ? " stale" : "") + '"><b>#' + n.id + " [" + esc(n.kind) + "] " + esc(n.title) + "</b>" +
+  (n.stale ? '<div class="warn">' + esc(n.stale) + "</div>" : "") + esc(n.body) + '<div class="muted">' + esc(n.date) + "</div></div>").join("") : "";
+// a note about a deleted file has no node to click, so list out-of-date notes up front
+if (staleNotes.length) panel.innerHTML += notesHtml(staleNotes, "Out-of-date notes (" + staleNotes.length + ")");
 
 function focus(id) {
   const n = cy.getElementById(id);

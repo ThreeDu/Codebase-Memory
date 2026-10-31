@@ -19,7 +19,7 @@ Codebase Memory builds a long-term memory of a codebase: the module map, entry p
 - **git** (optional): if the project you index is a git repository, `.gitignore` is respected automatically
 - **Internet access** only for the graph view, which loads its drawing library from a CDN
 
-Supported source files: TypeScript / JavaScript (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, both ES modules and CommonJS), Python (`.py`), Go (`.go`), Java (`.java`), and Rust (`.rs`). Build output folders (`dist`, `build`, `target`) are skipped.
+Supported source files: TypeScript / JavaScript (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, both ES modules and CommonJS), Python (`.py`), Go (`.go`), Java (`.java`), Rust (`.rs`), C/C++ (`.c .h .cc .cpp .cxx .hh .hpp .hxx`), and C# (`.cs`). Build output folders (`dist`, `build`, `target`, `obj`) are skipped.
 
 ## Installation
 
@@ -269,6 +269,7 @@ In the graph:
 | Box | A folder (nested like the folder tree) |
 | Dot | A file. Bigger = imported by more files. Color = top-level folder |
 | Orange ring | Entry point |
+| "⚠ out of date" in the header | Notes whose files or folders no longer exist. They are listed in the side panel when the page opens (amber border), since a deleted file has no dot to click |
 | Arrow | "imports". Highlighted arrows are labelled with the imported names |
 
 | What you do | What happens |
@@ -405,9 +406,11 @@ All files are plain JSON/Markdown and safe to delete. `codemem index` rebuilds e
 | `codemem: kind must be one of: decision, convention, fix` | `--kind` is missing or misspelled in `note add` |
 | Results look stale | `context`, `symbol`, `read` and the MCP tools re-index first; `map` and `graph.html` update on `codemem index` or while `codemem watch` runs |
 | Go package or Java/Rust import shows as a package | Go: the import must start with the `module` path of a `go.mod` in the repo. Java: the folders must match the package (`com/shop/User.java` for `com.shop.User`). Rust: only `mod x;` files (`x.rs` or `x/mod.rs`) are followed, not `#[path]` |
-| A Go/Java/Rust function's line range is wrong | Definitions are found by regex: code must be formatted the usual way (gofmt/rustfmt, top-level types at column 0), and a brace inside a block comment or multi-line string confuses it |
+| A Go/Java/Rust/C/C++/C# function's line range is wrong | Definitions are found by regex: code must be formatted the usual way (gofmt/rustfmt, top-level types at column 0 or one level into a C# `namespace { }`), and a brace inside a block comment or multi-line string confuses it |
+| A C/C++ header links to the wrong file, or a `.c` file shows as an entry point | Includes are found like an include directory would: by the file ending in the included path. A header links to its implementation only when that file has the same name (next to it, or unique in the repo) and defines something the includer uses |
+| C++ code inside an indented `namespace x {` is missing | Only unindented namespace bodies (LLVM/Google style) are read |
 | A function shows no callers you expected | Calls are matched by name: a method called through an instance (`obj.train()`) is not tracked, and a default import is matched by the name used when importing it |
-| Import with a tsconfig `paths` alias (`@/components/...`) shows as a package | Aliases are not resolved yet |
+| Import with an alias (`@/components/...`) shows as a package | The alias must be in `compilerOptions.paths` (or `baseUrl`) of a `tsconfig*.json` or `jsconfig.json` in a folder above the importing file. A config that only `extends` another one gets nothing from it: put `paths` in the file that's read |
 | Python file imports show as packages | Absolute imports are looked up from the importing file's folder up to the project root, then `src/`. Other source roots aren't searched |
 | Graph page is blank | It needs internet to load Cytoscape from cdnjs/jsDelivr |
 | Graph is slow | Expected above roughly 2000 files |

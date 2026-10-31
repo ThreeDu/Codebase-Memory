@@ -2,7 +2,7 @@
 
 Long-term memory for a codebase, so AI coding agents pick up its architecture without re-scanning everything.
 
-- **Module map**: every TS/JS, Python, Go, Java, and Rust file with its resolved imports and packages, plus its entry points and most depended-on modules.
+- **Module map**: every TS/JS, Python, Go, Java, Rust, C/C++, and C# file with its resolved imports and packages, plus its entry points and most depended-on modules.
 - **Symbols**: the functions, classes, and methods each file defines, which names it takes from which file, and which of those each function calls, so you can ask where `ChurnPredictor` is defined and which functions use it.
 - **Notes**: architecture decisions, code conventions, and bugs that were already fixed, each attached to the files or folders it's about.
 - **Incremental**: only files whose content changed get re-parsed.
@@ -61,11 +61,13 @@ Or give Claude Code the full usage guide as a skill: `cp -r skills/codemem ~/.cl
 
 ## Limits (v1)
 
-- Parses TS/JS (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, ES modules and CommonJS), Python (`.py`), Go (`.go`), Java (`.java`), and Rust (`.rs`).
-- Go, Java, Rust: found by regex on conventionally formatted code (gofmt, rustfmt, top-level types at column 0). Go imports of the module in `go.mod` resolve to every non-test file in that package's folder; Java `a.b.C` resolves to the file ending in `a/b/C.java` under any source root; Rust follows `mod x;`, `use crate::/self::/super::`, groups, `as`, and `pub use` re-exports. Go and Java files are linked to files of their own package (same folder) whose functions/types they use. Braces inside block comments or multi-line strings can throw off a definition's end line.
+- Parses TS/JS (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, ES modules and CommonJS), Python (`.py`), Go (`.go`), Java (`.java`), Rust (`.rs`), C/C++ (`.c .h .cc .cpp .cxx .hh .hpp .hxx`), and C# (`.cs`).
+- C/C++: `#include "x.h"` is looked up next to the file, then (like `<x.h>`) as any repo file ending in that path; an included header also links to the file implementing it (`util.h` -> `util.c`, the same name next to it or the only one in the repo). Prototypes are skipped so calls go to the definition; `Foo::bar` is method `bar` of `Foo`. Definitions are expected at the top level or inside an unindented `namespace x {`.
+- C#: a file is linked to the files of each namespace in view (its own and its parents, plus every `using`) whose types it mentions; `namespace X { }` and file-scoped `namespace X;` both work. `global using` applies only to the file it's written in.
+- Go, Java, Rust, C/C++, C#: found by regex on conventionally formatted code (gofmt, rustfmt, top-level types at column 0). Go imports of the module in `go.mod` resolve to every non-test file in that package's folder; Java `a.b.C` resolves to the file ending in `a/b/C.java` under any source root; Rust follows `mod x;`, `use crate::/self::/super::`, groups, `as`, and `pub use` re-exports. Go and Java files are linked to files of their own package (same folder) whose functions/types they use. Braces inside block comments or multi-line strings can throw off a definition's end line.
 - Symbols: top-level functions, classes, methods, exported constants (TS/JS) and module CONSTANTS (Python). Calls are matched by name, so a method called through an instance (`obj.train()`) is not tracked; a default import or `module.exports = expr` is matched by its local name / the file name.
 - Python: imports and symbols are found by regex, and absolute imports are looked up from the importing file's folder up to the repo root (so a service folder like `ml-service/` works as its own source root), then `src/`.
-- tsconfig `paths` aliases are listed as packages, not resolved.
+- TS/JS aliases: `paths` and `baseUrl` from every `tsconfig*.json` / `jsconfig.json` are applied to files under that config's folder; `extends` is not followed.
 - `context`, `symbol`, `read` and the MCP tools re-hash every file before answering (only changed ones are re-parsed), which may get slow on very large repos. `codemem watch` is the opt-in file watcher.
 
 ## Develop

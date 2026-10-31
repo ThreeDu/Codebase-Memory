@@ -2,15 +2,18 @@ import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
+import ts from "typescript";
 import { loadNotes, staleMark } from "./notes.js";
-import { parseGo, parseJava, parsePy, parseRust, parseTs, type Parsed } from "./parse.js";
+import { parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, type Parsed } from "./parse.js";
 
 export const STORE = ".codemem";
-const VERSION = 6; // bump when parse output changes, so cached entries get re-parsed
-const CODE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|java|rs)$/;
+const VERSION = 7; // bump when parse output changes, so cached entries get re-parsed
+const CODE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|java|rs|c|h|cc|cpp|cxx|hh|hpp|hxx|cs)$/;
 const EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
-const SKIP = new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", "target", STORE]);
-const TEST = /(\.|\/)(test|spec)\.[^/]+$|(^|\/)(__tests__|tests?)\/|(^|\/)(test_[^/]*|[^/]*_test|conftest)\.py$|_test\.go$/;
+const SKIP = new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", "target", "obj", STORE]);
+// test files and folders; the last part is C# test projects (MyApp.Tests/)
+const TEST =
+  /(\.|\/)(test|spec)\.[^/]+$|(^|\/)(__tests__|tests?)\/|(^|\/)(test_[^/]*|[^/]*_test|conftest)\.py$|_test\.go$|(^|\/)[^/]*\.Tests?\//;
 
 // specs/names/symbols are parse output, cached by hash; imports/external/uses are re-resolved every run
 // so new or deleted target files are picked up
@@ -89,7 +92,32 @@ interface Ctx {
   byName: Map<string, string[]>; // file name -> paths with that name
   goMods: [string, string][]; // go.mod folder, module path; longest path first
   crates: [string, string][]; // Cargo.toml folder, library name (how other crates and the crate's own main.rs call it)
+  tsPaths: TsPaths[]; // tsconfig*.json / jsconfig.json with baseUrl or paths; deepest folder first
 }
+interface TsPaths {
+  dir: string; // the config's folder: it applies to files under it
+  base: string; // what `paths` targets and bare imports are relative to: baseUrl, else the config's folder
+  baseUrl: boolean;
+  paths: [string, string[]][];
+}
+
+/** Candidate files for an aliased import like "@/lib/x", or undefined when no `paths` pattern matches. */
+function aliasTargets(from: string, spec: string, ctx: Ctx): string[] | undefined {
+  for (const c of ctx.tsPaths) {
+    if (c.dir !== "." && !from.startsWith(`${c.dir}/`)) continue;
+    for (const [pattern, targets] of c.paths) {
+      if (pattern === "*") continue; // a catch-all matches every package too; fromBaseUrl covers the usual "*": ["src/*"]
+      const star = pattern.indexOf("*");
+      const [pre, post] = star < 0 ? [pattern, ""] : [pattern.slice(0, star), pattern.slice(star + 1)];
+      const hit = star < 0 ? spec === pattern : spec.startsWith(pre) && spec.endsWith(post) && spec.length >= pre.length + post.length;
+      if (hit) return targets.map((t) => posix.join(c.base, t.replace("*", spec.slice(pre.length, spec.length - post.length))));
+    }
+  }
+}
+
+/** A bare import that is a file under a config's baseUrl (CRA-style `import Button from "components/Button"`). */
+const fromBaseUrl = (from: string, spec: string, ctx: Ctx) =>
+  ctx.tsPaths.filter((c) => c.baseUrl && (c.dir === "." || from.startsWith(`${c.dir}/`))).map((c) => posix.join(c.base, spec));
 
 /** Go: an import of this repo's module is a package = every non-test .go file in that folder. */
 function resolveGo(spec: string, ctx: Ctx): string[] {
@@ -151,14 +179,38 @@ function resolveRs(from: string, spec: string, ctx: Ctx): string | undefined {
   }
 }
 
-type Lang = "ts" | "py" | "go" | "java" | "rs";
-const langOf = (f: string) => (f.match(/\.(py|go|java|rs)$/)?.[1] ?? "ts") as Lang;
+/** C/C++: "x.h" next to the including file first; otherwise, and for <x.h>, the repo file ending in that path, the way an
+ * include directory finds it. shortcut: with two such files the first wins; read the build's -I flags if that bites. */
+function resolveC(from: string, spec: string, ctx: Ctx): string[] {
+  const path = spec.replace(/^<(.*)>$/, "$1");
+  const near = posix.join(posix.dirname(from), path);
+  if (path === spec && ctx.known.has(near)) return [near];
+  const hit = ctx.byName.get(posix.basename(path))?.find((f) => f === path || f.endsWith(`/${path}`));
+  return hit ? [hit] : [];
+}
+
+/** The source file implementing header h: same name next to it, else the only file with that name in the repo. */
+function implOf(h: string, ctx: Ctx): string | undefined {
+  if (!/\.(h|hh|hpp|hxx)$/.test(h)) return undefined;
+  const stem = h.replace(/\.\w+$/, "");
+  const exts = [".c", ".cc", ".cpp", ".cxx"];
+  const next = exts.map((e) => stem + e).find((c) => ctx.known.has(c));
+  const anywhere = exts.flatMap((e) => ctx.byName.get(posix.basename(stem) + e) ?? []);
+  return next ?? (anywhere.length === 1 ? anywhere[0] : undefined);
+}
+
+type Lang = "ts" | "py" | "go" | "java" | "rs" | "c" | "cs";
+const LANG_BY_EXT: Record<string, Lang> = { py: "py", go: "go", java: "java", rs: "rs", cs: "cs" };
+for (const ext of ["c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx"]) LANG_BY_EXT[ext] = "c";
+const langOf = (f: string): Lang => LANG_BY_EXT[f.slice(f.lastIndexOf(".") + 1)] ?? "ts";
 
 function parse(lang: Lang, f: string, src: string): Parsed {
   if (lang === "py") return parsePy(src);
   if (lang === "go") return parseGo(src);
   if (lang === "java") return parseJava(src);
   if (lang === "rs") return parseRust(src);
+  if (lang === "c") return parseC(src);
+  if (lang === "cs") return parseCSharp(src);
   return parseTs(f, src);
 }
 
@@ -168,13 +220,17 @@ function resolveSpec(lang: Lang, f: string, s: string, ctx: Ctx): string[] {
   if (lang === "go") return resolveGo(s, ctx);
   if (lang === "java") return resolveJava(s, ctx);
   if (lang === "rs") return one(resolveRs(f, s, ctx));
-  // shortcut: tsconfig "paths" aliases land in external; resolve them when a target repo needs it.
-  return s.startsWith(".") ? one(resolve(f, s, ctx.known)) : [];
+  if (lang === "c") return resolveC(f, s, ctx);
+  if (lang === "cs") return []; // namespaces are matched to files after every file is parsed
+  if (s.startsWith(".")) return one(resolve(f, s, ctx.known));
+  const candidates = [...(aliasTargets(f, s, ctx) ?? []), ...fromBaseUrl(f, s, ctx)];
+  return one(candidates.map((c) => resolve("", c, ctx.known)).find(Boolean));
 }
 
 /** The package an unresolved import comes from, or undefined when it points into this repo. */
 function externalOf(lang: Lang, f: string, s: string, ctx: Ctx): string | undefined {
-  if (lang === "ts") return s.startsWith(".") ? undefined : packageName(s);
+  // an alias whose file is missing is still this repo's code, not a package named "@"
+  if (lang === "ts") return s.startsWith(".") || aliasTargets(f, s, ctx) ? undefined : packageName(s);
   if (lang === "py") {
     // "pkg.func" won't resolve to a file; only call it external when the top-level package isn't local
     const top = s.split(".")[0];
@@ -186,6 +242,8 @@ function externalOf(lang: Lang, f: string, s: string, ctx: Ctx): string | undefi
     return segs[0].includes(".") ? segs.slice(0, 3).join("/") : s; // github.com/a/b, or a std package like net/http
   }
   if (lang === "java") return s.split(".").slice(0, 2).join(".");
+  if (lang === "c") return s.replace(/^<(.*)>$/, "$1").split("/")[0]; // <boost/asio.hpp> -> boost, <vector> -> vector
+  if (lang === "cs") return undefined;
   const top = s.split("::")[0];
   return ["crate", "self", "super"].includes(top) ? undefined : top;
 }
@@ -201,7 +259,7 @@ export function update(root: string): { index: Index; parsed: number } {
   const old = loadIndex(root);
   const all = listFiles(root);
   const files = all.filter((f) => CODE.test(f) && existsSync(join(root, f)));
-  const ctx: Ctx = { known: new Set(files), byDir: new Map(), byName: new Map(), goMods: [], crates: [] };
+  const ctx: Ctx = { known: new Set(files), byDir: new Map(), byName: new Map(), goMods: [], crates: [], tsPaths: [] };
   for (const f of files) {
     push(ctx.byDir, posix.dirname(f), f);
     push(ctx.byName, posix.basename(f), f);
@@ -217,6 +275,15 @@ export function update(root: string): { index: Index; parsed: number } {
     const name = field("lib") ?? field("package");
     if (name) ctx.crates.push([posix.dirname(f), name.replace(/-/g, "_")]);
   }
+  // shortcut: `extends` isn't followed; every tsconfig*.json is read on its own, which covers Vite's tsconfig.app.json
+  for (const f of all.filter((f) => /^(tsconfig.*|jsconfig)\.json$/.test(posix.basename(f)) && existsSync(join(root, f)))) {
+    const opts = ts.parseConfigFileTextToJson(f, readFileSync(join(root, f), "utf8")).config?.compilerOptions; // allows comments
+    if (!opts?.baseUrl && !opts?.paths) continue;
+    const dir = posix.dirname(f);
+    const paths = Object.entries((opts.paths ?? {}) as Record<string, string[]>);
+    ctx.tsPaths.push({ dir, base: posix.join(dir, opts.baseUrl ?? "."), baseUrl: !!opts.baseUrl, paths });
+  }
+  ctx.tsPaths.sort((a, b) => b.dir.length - a.dir.length);
 
   const index: Index = { version: VERSION, files: {} };
   let parsed = 0;
@@ -246,20 +313,48 @@ export function update(root: string): { index: Index; parsed: number } {
       if (ext) external.add(ext);
     }
     for (const t of localTops) external.delete(t);
-    const { specs, names, symbols, main } = p;
-    index.files[f] = { hash, specs, names, symbols, main, imports: [...imports].sort(), external: [...external].sort(), uses };
+    const { specs, names, symbols, main, namespaces, refs } = p;
+    const entry = { hash, specs, names, symbols, main, namespaces, refs, uses };
+    index.files[f] = { ...entry, imports: [...imports].sort(), external: [...external].sort() };
   }
 
-  // Go and Java files use the rest of their package (folder) without importing it
+  // Links no import line states: Go/Java files use their package (folder), C/C++ files use the source behind an
+  // included header, C# files use the files of every namespace in view. Only names the file mentions count, so an
+  // unrelated file of the same package or namespace isn't linked.
+  const nsFiles = new Map<string, string[]>();
+  for (const [f, e] of Object.entries(index.files)) for (const ns of e.namespaces ?? []) push(nsFiles, ns, f);
   for (const [f, e] of Object.entries(index.files)) {
-    if (!/\.(go|java)$/.test(f)) continue;
-    const called = new Set(e.symbols.flatMap((s) => s.calls ?? []));
-    for (const g of ctx.byDir.get(posix.dirname(f)) ?? []) {
-      if (g === f || posix.extname(g) !== posix.extname(f)) continue;
-      const used = index.files[g].symbols.filter((s) => !s.parent && called.has(s.name)).map((s) => s.name);
-      if (!used.length) continue;
+    const lang = langOf(f);
+    const mentioned = new Set(e.refs ?? e.symbols.flatMap((s) => s.calls ?? []));
+    const link = (g: string) => {
+      if (g === f) return;
+      // a class counts when g defines its methods: Foo::bar in foo.cpp implements Foo declared in foo.h
+      const used = [...new Set(index.files[g].symbols.map((s) => s.parent ?? s.name))].filter((n) => mentioned.has(n));
+      if (!used.length) return;
       e.imports = [...new Set([...e.imports, g])].sort();
       e.uses[g] = [...new Set([...(e.uses[g] ?? []), ...used])];
+    };
+    if (lang === "go" || lang === "java") {
+      for (const g of ctx.byDir.get(posix.dirname(f)) ?? []) if (posix.extname(g) === posix.extname(f)) link(g);
+    } else if (lang === "c") {
+      for (const h of [...e.imports]) {
+        const impl = implOf(h, ctx);
+        if (impl) link(impl);
+      }
+    } else if (lang === "cs") {
+      // in view: the file's own namespaces and their parents, plus every `using`
+      const inView = new Set<string>();
+      for (const ns of e.namespaces ?? []) for (let n = ns; n; n = n.slice(0, Math.max(0, n.lastIndexOf(".")))) inView.add(n);
+      const external = new Set<string>();
+      for (const s of e.specs) {
+        const parent = s.includes(".") ? s.slice(0, s.lastIndexOf(".")) : "";
+        // `using static A.B.C;` / `using X = A.B.C;` name a type, whose namespace is A.B
+        const ns = nsFiles.has(s) ? s : nsFiles.has(parent) ? parent : undefined;
+        if (ns) inView.add(ns);
+        else external.add(s.split(".").slice(0, 2).join("."));
+      }
+      e.external = [...external].sort();
+      for (const ns of inView) for (const g of nsFiles.get(ns) ?? []) link(g);
     }
   }
   mkdirSync(join(root, STORE), { recursive: true });
@@ -322,7 +417,9 @@ export function entryPoints(root: string, index: Index): string[] {
   for (const f of known) if (!importers.has(f) && !TEST.test(f) && !f.endsWith("__init__.py")) found.add(f);
   // a file that runs on its own stays an entry point even when another file imports it back for its helpers
   for (const [f, e] of Object.entries(index.files)) {
-    const hasMain = e.symbols.some((s) => s.name === "main" && (!s.parent || f.endsWith(".java")));
+    const hasMain = e.symbols.some(
+      (s) => (s.name === "main" && (!s.parent || f.endsWith(".java"))) || (s.name === "Main" && f.endsWith(".cs")),
+    );
     if (!TEST.test(f) && (e.main || hasMain)) found.add(f);
   }
   return [...found].sort();

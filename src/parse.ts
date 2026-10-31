@@ -14,6 +14,8 @@ export interface Parsed {
   names: Record<string, string[]>; // spec -> names imported from it ("*" for a whole-module import)
   symbols: Sym[];
   main?: boolean; // runs on its own (Python `if __name__ == "__main__":`), even if other files import it
+  namespaces?: string[]; // C#: namespaces this file declares
+  refs?: string[]; // C#: every name the file mentions, including top-level statements outside any class
 }
 
 const pushUnique = (m: Record<string, string[]>, k: string, v: string) => {
@@ -266,11 +268,14 @@ function blockEnd(lines: string[], start: number): number {
   return start + 1;
 }
 
+// names called (followed by "(") or mentioned as a type (CamelCase); unknown ones are dropped when resolved
+const MENTION = /\b[A-Za-z_]\w*(?=\s*\()|\b[A-Z]\w*/g;
+
 /** Names a definition calls or mentions as a type. Unknown ones (builtins, locals, packages) are dropped when resolved. */
 function bodyCalls(lines: string[], s: Sym, alias: Map<string, string>): void {
   const text = lines.slice(s.line - 1, s.end).map(code).join("\n");
   const calls = new Set<string>();
-  for (const [id] of text.matchAll(/\b[A-Za-z_]\w*(?=\s*\()|\b[A-Z]\w*/g)) {
+  for (const [id] of text.matchAll(MENTION)) {
     const name = alias.get(id) ?? id;
     if (name !== s.name && name !== s.parent) calls.add(name);
   }
@@ -279,21 +284,33 @@ function bodyCalls(lines: string[], s: Sym, alias: Map<string, string>): void {
 
 type Top = { sym?: Omit<Sym, "line">; container?: string }; // container: methods indented under it belong to it
 
+/** Indent of the code inside the first `namespace X {` block (C#'s usual 4; 0 for C++'s unindented style or none). */
+function namespaceIndent(lines: string[], header: RegExp): number {
+  const at = lines.findIndex((l) => header.test(l));
+  const next = at < 0 ? undefined : lines.slice(at + 1).find((l) => l.trim() && l.trim() !== "{");
+  return next ? next.search(/\S/) : 0;
+}
+
 function blockSymbols(
   src: string,
   top: (l: string) => Top | undefined,
   member: (l: string, cls: string) => string | undefined,
   alias = new Map<string, string>(),
+  topIndent = 0, // where top-level definitions start: inside a namespace block they're indented
 ): Sym[] {
   const lines = src.split(/\r?\n/);
   const symbols: Sym[] = [];
   let cls: { name: string; inner?: number } | undefined;
   lines.forEach((l, i) => {
     const indent = l.search(/\S/);
-    if (indent < 0 || /^\s*(\/\/|\/\*|\*)/.test(l)) return;
-    if (indent === 0) {
-      const t = top(l);
-      cls = t?.container ? { name: t.container } : undefined;
+    // comments, and #include / #region / #[derive(..)] lines
+    if (indent < 0 || /^\s*(\/\/|\/\*|\*|#)/.test(l)) return;
+    if (indent < topIndent) cls = undefined; // the namespace block's own lines
+    else if (indent === topIndent) {
+      const t = top(l.trimStart());
+      // only a new definition or the closing brace ends a class: C++ puts `public:` at the class's own indent
+      if (t) cls = t.container ? { name: t.container } : undefined;
+      else if (l.trimStart().startsWith("}")) cls = undefined;
       if (t?.sym) symbols.push({ ...t.sym, line: i + 1, end: blockEnd(lines, i) });
     } else if (cls) {
       const name = member(l.trim(), cls.name);
@@ -435,4 +452,71 @@ export function parseRust(src: string): Parsed {
     pushUnique(names, `${first}::${next}`, next);
   }
   return { specs: [...specs], names, symbols: blockSymbols(src, rsTop, rsMember, alias) };
+}
+
+// ---- C / C++: definitions at the top level or inside an unindented `namespace x {` (LLVM/Google style)
+const C_KEYWORD = /^(if|for|while|switch|return|else|do|case|sizeof|typedef|using|namespace|template|extern|static_assert|goto|delete|new|throw|friend)\b/;
+const C_TYPE = /^(?:typedef\s+)?(struct|class|union|enum(?:\s+class|\s+struct)?)\s+(?:\w+\s+)*?(\w+)\s*(?:final\s*)?(?::[^{;]*)?(\{.*)?$/;
+// return type tokens, then a name that may be qualified (Foo::bar, Foo::~Foo), then "("
+const C_FN = /^((?:[\w:<>,*&[\]]+[\s*&]+)*)((?:\w+::)*~?\w+)\s*\(/;
+const C_NOT_TYPE = new Set(["return", "new", "delete", "throw", "else", "case", "goto", "co_return", "co_await"]);
+
+const cTop = (l: string): Top | undefined => {
+  if (C_KEYWORD.test(l)) return undefined;
+  let m = l.match(C_TYPE);
+  if (m) return { sym: { name: m[2], kind: "class", exported: true }, container: m[2] };
+  m = l.match(C_FN);
+  if (!m || (!m[1] && /;\s*$/.test(l))) return undefined; // `MACRO(x);` is a call, not a definition
+  const parts = m[2].split("::");
+  const name = parts.pop()!;
+  const parent = parts.pop(); // Foo::bar is method bar of class Foo
+  return { sym: { name, kind: parent ? "method" : "function", parent, exported: !/\bstatic\b/.test(m[1]) } };
+};
+const cMember = (l: string, cls: string) => {
+  const m = l.match(C_FN);
+  if (!m || C_KEYWORD.test(l) || C_NOT_TYPE.has(m[1].trim().split(/\s+/).pop() ?? "")) return undefined;
+  // a member has a return type, except constructors and destructors
+  return m[1] || m[2] === cls || m[2] === `~${cls}` ? m[2] : undefined;
+};
+
+/** C / C++: `#include "x.h"` as "x.h", `#include <x.h>` as "<x.h>". Prototypes are skipped: the file with the body defines. */
+export function parseC(src: string): Parsed {
+  const names: Record<string, string[]> = {};
+  for (const [, open, path] of src.matchAll(/^\s*#\s*include\s*([<"])([^>"]+)[>"]/gm))
+    pushUnique(names, open === "<" ? `<${path}>` : path, "*");
+  const lines = src.split(/\r?\n/);
+  const symbols = blockSymbols(src, cTop, cMember, new Map(), namespaceIndent(lines, /^namespace\s*[\w:]*\s*\{\s*(\/\/.*)?$/)).filter(
+    (s) => s.kind !== "function" || lines.slice(s.line - 1, s.end).map(code).join("\n").includes("{"),
+  );
+  return { specs: Object.keys(names), names, symbols };
+}
+
+// ---- C#: types at the top level or one level into a `namespace X { }` block; `namespace X;` (file-scoped) keeps them at 0
+const CS_MODS = "public|private|protected|internal|static|virtual|override|abstract|sealed|async|extern|unsafe|new|partial|readonly|required|file";
+const CS_TOP = new RegExp(`^(?:\\[.*?\\]\\s*)*((?:(?:${CS_MODS}|ref)\\s+)*)(class|struct|interface|enum|record(?:\\s+class|\\s+struct)?)\\s+(\\w+)`);
+const CS_MEMBER = new RegExp(
+  `^((?:(?:${CS_MODS})\\s+)*)(?:([\\w.<>\\[\\]?,]+(?:\\s+[\\w.<>\\[\\]?,]+)*?)\\s+)?(\\w+)\\s*(?:<[^>()]*>)?\\s*\\(`,
+);
+const CS_NOT_TYPE = new Set(["return", "new", "throw", "else", "case", "await", "yield", "using", "lock", "foreach", "if", "while"]);
+
+const csTop = (l: string): Top | undefined => {
+  const m = l.match(CS_TOP);
+  return m ? { sym: { name: m[3], kind: "class", exported: /\bpublic\b/.test(m[1]) }, container: m[3] } : undefined;
+};
+const csMember = (l: string, cls: string) => {
+  const m = l.match(CS_MEMBER);
+  if (!m || CS_NOT_TYPE.has(m[2] ?? "")) return undefined;
+  return m[1] || m[2] || m[3] === cls ? m[3] : undefined; // a constructor has no return type
+};
+
+/** C#: `using A.B;` as "A.B" (also `using static` / `using X = ...`). Which files that reaches is decided once all files
+ * are parsed, from the namespaces each declares. */
+export function parseCSharp(src: string): Parsed {
+  const names: Record<string, string[]> = {};
+  for (const [, ns] of src.matchAll(/^\s*(?:global\s+)?using\s+(?:static\s+)?(?:\w+\s*=\s*)?([\w.]+)\s*;/gm)) names[ns] = [];
+  const namespaces = [...new Set([...src.matchAll(/^\s*namespace\s+([\w.]+)/gm)].map((m) => m[1]))];
+  const lines = src.split(/\r?\n/);
+  const refs = new Set([...lines.map(code).join("\n").matchAll(MENTION)].map((m) => m[0]));
+  const symbols = blockSymbols(src, csTop, csMember, new Map(), namespaceIndent(lines, /^namespace\s+[\w.]+\s*\{?\s*$/));
+  return { specs: Object.keys(names), names, symbols, namespaces, refs: [...refs].sort() };
 }
