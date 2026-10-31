@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { context, findSymbol, readSymbol } from "../src/context.js";
 import { writeGraph } from "../src/graph.js";
@@ -214,6 +214,30 @@ test("reads Rust: mod, use (groups, as, super, re-exports), impl methods", () =>
   // `Status as OrderStatus` maps back to Status, which `pub use` re-exports from status.rs; util::describe via `mod util;`
   assert.deepEqual(callsOf(index, "src/main.rs", "main"), ["Order@src/models/mod.rs", "Status@src/models/status.rs", "describe@src/util.rs"]);
   assert.match(readSymbol(rs, "Order.total"), /mod.rs:14-16`/);
+});
+
+test("handles patterns found in real repos", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codemem-"));
+  const put = (f: string, src: string) => {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), src);
+  };
+  // Python app whose main.py is imported back by the UI for helpers (a cycle): it still runs on its own
+  put("main.py", `import ui\n\ndef get_dir():\n    return "."\n\nif __name__ == "__main__":\n    ui.start()\n`);
+  put("ui/__init__.py", "");
+  put("ui/app.py", `def start():\n    from main import get_dir\n    return get_dir()\n`);
+  put("config.py", `PORT = 1\n`);
+  // Rust binary calling its own library by crate name ("my-app" -> my_app), plus a crate used without `use`
+  put("Cargo.toml", `[package]\nname = "my-app"\n\n[dependencies]\nserde_json = "1"\n`);
+  put("src/lib.rs", `pub fn run() {}\n`);
+  put("src/main.rs", `fn main() {\n    my_app::run();\n    let _ = serde_json::to_string(&1);\n}\n`);
+  const { index } = update(dir);
+  assert.ok(entryPoints(dir, index).includes("main.py"));
+  assert.deepEqual(index.files["src/main.rs"].imports, ["src/lib.rs"]);
+  assert.deepEqual(index.files["src/main.rs"].external, ["serde_json"]);
+  assert.deepEqual(callsOf(index, "src/main.rs", "main"), ["run@src/lib.rs"]);
+  // one heading per folder even though "config.py" < "main.py" sort around "src/" and "ui/"
+  assert.equal(renderMap(dir, index).match(/^### \(root\)$/gm)?.length, 1);
 });
 
 test("watch reacts only to indexed source files", () => {

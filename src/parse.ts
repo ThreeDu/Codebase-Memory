@@ -13,6 +13,7 @@ export interface Parsed {
   specs: string[]; // raw import specifiers
   names: Record<string, string[]>; // spec -> names imported from it ("*" for a whole-module import)
   symbols: Sym[];
+  main?: boolean; // runs on its own (Python `if __name__ == "__main__":`), even if other files import it
 }
 
 const pushUnique = (m: Record<string, string[]>, k: string, v: string) => {
@@ -240,7 +241,8 @@ export function parsePy(src: string): Parsed {
     }
     if (calls.size) s.calls = [...calls].sort();
   }
-  return { specs: [...specs], names, symbols };
+  const main = /^if\s+__name__\s*==\s*["']__main__["']\s*:/m.test(src) || undefined;
+  return { specs: [...specs], names, symbols, main };
 }
 
 // ---- Go, Java, Rust: regex scan of conventionally formatted code (gofmt / rustfmt / Java's usual layout).
@@ -422,6 +424,15 @@ export function parseRust(src: string): Parsed {
   for (const [spec, name] of local) {
     specs.add(spec);
     for (const [, x] of src.matchAll(new RegExp(`\\b${name}::(\\w+)`, "g"))) pushUnique(names, spec, x);
+  }
+  // paths used without a `use`: `serde_json::to_string(..)`, `std::fs::read`, `my_crate::run()`. A lowercase first
+  // segment is a crate or module (types are CamelCase); names already brought in by use/mod are covered above
+  const inScope = new Set(local.map(([, name]) => name));
+  const body = src.replace(/^\s*(?:pub(?:\([^)]*\))?\s+)?use\s+[^;]+;/gm, "").split(/\r?\n/).map(code).join("\n");
+  for (const [, first, next] of body.matchAll(/(?<![\w:])([a-z_]\w*)::(\w+)/g)) {
+    if (inScope.has(first)) continue;
+    specs.add(`${first}::${next}`);
+    pushUnique(names, `${first}::${next}`, next);
   }
   return { specs: [...specs], names, symbols: blockSymbols(src, rsTop, rsMember, alias) };
 }

@@ -129,7 +129,7 @@ codemem map
   - defines: run, class App
 ```
 
-- **Entry points**: files listed in `package.json` (`main`, `bin`, `exports`) plus source files nothing imports (tests and `__init__.py` excluded). An unexpected entry point is often dead code.
+- **Entry points**: files listed in `package.json` (`main`, `bin`, `exports`), source files nothing imports (tests and `__init__.py` excluded), and files that run on their own even if something imports them back: a Python `if __name__ == "__main__":` block, or a top-level `main` function (Java: a `main` method). An unexpected entry point is often dead code.
 - **Most depended-on**: changing these affects the most files.
 - **Modules**: every file with what it imports (`pkg:` = external package) and what it defines.
 

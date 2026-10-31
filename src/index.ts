@@ -6,7 +6,7 @@ import { loadNotes, staleMark } from "./notes.js";
 import { parseGo, parseJava, parsePy, parseRust, parseTs, type Parsed } from "./parse.js";
 
 export const STORE = ".codemem";
-const VERSION = 5; // bump when parse output changes, so cached entries get re-parsed
+const VERSION = 6; // bump when parse output changes, so cached entries get re-parsed
 const CODE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|java|rs)$/;
 const EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
 const SKIP = new Set(["node_modules", ".git", "dist", "build", "__pycache__", ".venv", "venv", "target", STORE]);
@@ -88,6 +88,7 @@ interface Ctx {
   byDir: Map<string, string[]>; // folder -> its source files
   byName: Map<string, string[]>; // file name -> paths with that name
   goMods: [string, string][]; // go.mod folder, module path; longest path first
+  crates: [string, string][]; // Cargo.toml folder, library name (how other crates and the crate's own main.rs call it)
 }
 
 /** Go: an import of this repo's module is a package = every non-test .go file in that folder. */
@@ -118,11 +119,17 @@ function resolveJava(spec: string, ctx: Ctx): string[] {
 /** Rust module folder: items of `src/a.rs` (or `src/a/mod.rs`) live in `src/a/`; lib.rs and main.rs are the crate root. */
 const rsModDir = (f: string) => (/(^|\/)(lib|main|mod)\.rs$/.test(f) ? posix.dirname(f) : f.slice(0, -3));
 
-function resolveRs(from: string, spec: string, known: Set<string>): string | undefined {
+function resolveRs(from: string, spec: string, ctx: Ctx): string | undefined {
+  const { known } = ctx;
   const segs = spec.split("::");
   let base = rsModDir(from);
   let min = 1; // a plain `a::b` starts at a child module, never at this file
-  if (segs[0] === "crate") {
+  const crate = ctx.crates.find(([, name]) => name === segs[0]); // `mysetup::run()` from main.rs or another crate
+  if (crate && known.has(posix.join(crate[0], "src/lib.rs"))) {
+    base = posix.join(crate[0], "src");
+    segs.shift();
+    min = 0;
+  } else if (segs[0] === "crate") {
     const isRoot = (d: string) => known.has(posix.join(d, "lib.rs")) || known.has(posix.join(d, "main.rs"));
     base = ancestors(posix.dirname(from)).find(isRoot) ?? base;
     segs.shift();
@@ -160,7 +167,7 @@ function resolveSpec(lang: Lang, f: string, s: string, ctx: Ctx): string[] {
   if (lang === "py") return one(resolvePy(f, s, ctx.known));
   if (lang === "go") return resolveGo(s, ctx);
   if (lang === "java") return resolveJava(s, ctx);
-  if (lang === "rs") return one(resolveRs(f, s, ctx.known));
+  if (lang === "rs") return one(resolveRs(f, s, ctx));
   // shortcut: tsconfig "paths" aliases land in external; resolve them when a target repo needs it.
   return s.startsWith(".") ? one(resolve(f, s, ctx.known)) : [];
 }
@@ -194,7 +201,7 @@ export function update(root: string): { index: Index; parsed: number } {
   const old = loadIndex(root);
   const all = listFiles(root);
   const files = all.filter((f) => CODE.test(f) && existsSync(join(root, f)));
-  const ctx: Ctx = { known: new Set(files), byDir: new Map(), byName: new Map(), goMods: [] };
+  const ctx: Ctx = { known: new Set(files), byDir: new Map(), byName: new Map(), goMods: [], crates: [] };
   for (const f of files) {
     push(ctx.byDir, posix.dirname(f), f);
     push(ctx.byName, posix.basename(f), f);
@@ -204,6 +211,12 @@ export function update(root: string): { index: Index; parsed: number } {
     if (m) ctx.goMods.push([posix.dirname(f), m[1]]);
   }
   ctx.goMods.sort((a, b) => b[1].length - a[1].length);
+  for (const f of all.filter((f) => posix.basename(f) === "Cargo.toml" && existsSync(join(root, f)))) {
+    const toml = readFileSync(join(root, f), "utf8");
+    const field = (section: string) => toml.match(new RegExp(`^\\[${section}\\][^[]*?^name\\s*=\\s*"([^"]+)"`, "m"))?.[1];
+    const name = field("lib") ?? field("package");
+    if (name) ctx.crates.push([posix.dirname(f), name.replace(/-/g, "_")]);
+  }
 
   const index: Index = { version: VERSION, files: {} };
   let parsed = 0;
@@ -233,8 +246,8 @@ export function update(root: string): { index: Index; parsed: number } {
       if (ext) external.add(ext);
     }
     for (const t of localTops) external.delete(t);
-    const { specs, names, symbols } = p;
-    index.files[f] = { hash, specs, names, symbols, imports: [...imports].sort(), external: [...external].sort(), uses };
+    const { specs, names, symbols, main } = p;
+    index.files[f] = { hash, specs, names, symbols, main, imports: [...imports].sort(), external: [...external].sort(), uses };
   }
 
   // Go and Java files use the rest of their package (folder) without importing it
@@ -307,11 +320,20 @@ export function entryPoints(root: string, index: Index): string[] {
   const importers = importersOf(index);
   // __init__.py runs when its package is imported, never on its own
   for (const f of known) if (!importers.has(f) && !TEST.test(f) && !f.endsWith("__init__.py")) found.add(f);
+  // a file that runs on its own stays an entry point even when another file imports it back for its helpers
+  for (const [f, e] of Object.entries(index.files)) {
+    const hasMain = e.symbols.some((s) => s.name === "main" && (!s.parent || f.endsWith(".java")));
+    if (!TEST.test(f) && (e.main || hasMain)) found.add(f);
+  }
   return [...found].sort();
 }
 
 export function renderMap(root: string, index = loadIndex(root)): string {
-  const files = Object.keys(index.files).sort();
+  // by folder, then name, so each folder heading appears once (plain path order splits "main.py" from "config.py")
+  const files = Object.keys(index.files).sort((a, b) => {
+    const [da, db] = [posix.dirname(a), posix.dirname(b)];
+    return da === db ? (a < b ? -1 : 1) : da < db ? -1 : 1;
+  });
   const importers = importersOf(index);
   const notes = loadNotes(root);
   const lines = [
