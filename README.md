@@ -64,7 +64,7 @@ Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `search_symbols`, `re
 
 > Before working on an area, call `get_context` for it; find code by a rough name with `search_symbols`, and read a single function with `read_symbol` instead of the whole file. Record decisions, conventions, and non-obvious bug fixes with `add_note`; fix or remove notes marked `⚠ missing` or no longer true.
 
-Or give Claude Code the full usage guide as a skill: `cp -r skills/codemem ~/.claude/skills/` (see [docs/USAGE.md](docs/USAGE.md#or-install-the-skill-claude-code)).
+Or give Claude Code the full usage guide as a skill. With the package installed globally: `cp -r "$(npm root -g)/@threedu/codebase-memory/skills/codemem" ~/.claude/skills/` (see [docs/USAGE.md](docs/USAGE.md#or-install-the-skill-claude-code)).
 
 ## Limits (v1)
 

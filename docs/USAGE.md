@@ -400,18 +400,22 @@ Agents that can't use MCP can read `.codemem/map.md` directly.
 
 ### Or install the skill (Claude Code)
 
-[`skills/codemem/SKILL.md`](../skills/codemem/SKILL.md) is a fuller version of the lines above: when to call each tool, what makes a good note, and when to fall back to grep. Claude Code loads it on its own when a task needs it. Copy the folder to one of:
+[`skills/codemem/SKILL.md`](../skills/codemem/SKILL.md) is a fuller version of the lines above: which tool when, checking what a change breaks, finding unused code, writing good notes without duplicates, and what to do when results are empty or look wrong. Claude Code loads it on its own when a task needs it. Copy the folder to one of:
 
 | Where | Applies to |
 |---|---|
 | `~/.claude/skills/codemem/` | All your projects |
 | `<your-project>/.claude/skills/codemem/` | That project only (commit it so teammates get it) |
 
+With the package installed globally (`npm install -g @threedu/codebase-memory`):
+
 ```bash
-cp -r /path/to/Codebase-Memory/skills/codemem ~/.claude/skills/
+cp -r "$(npm root -g)/@threedu/codebase-memory/skills/codemem" ~/.claude/skills/
 ```
 
-Other agents (Cursor, Codex, ...): paste the body of `SKILL.md` (everything below the `---` header) into their rules file, e.g. `AGENTS.md`.
+From a clone: `cp -r skills/codemem ~/.claude/skills/`.
+
+Other agents (Cursor, Codex, ...): paste the body of `skills/codemem/SKILL.md` (everything below the `---` header) into their rules file, e.g. `AGENTS.md`.
 
 ## What gets stored
 
