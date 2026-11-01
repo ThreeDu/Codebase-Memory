@@ -29,6 +29,10 @@ test("CLI: index, map, context, symbol, read", () => {
   assert.match(ok("read", "App.start", "--root", root), /```\n  start\(\) \{\n    return run\("world"\);\n  \}\n```/);
   assert.match(ok("symbol", "nope", "--root", root), /No function or class named `nope`/);
   assert.match(ok("search", "greet", "--limit", "5", "--root", root), /function `greet` at `src\/lib\/greet.ts:2`/);
+  // affected: --quiet prints just the tests, ready for a test runner; --stdin takes `git diff --name-only` output
+  assert.equal(ok("affected", "src/lib/greet.ts", "--root", root, "--quiet").trim(), "src/main.test.ts");
+  const piped = spawnSync(process.execPath, [CLI, "affected", "--stdin", "--root", root], { input: "src/lib/greet.ts\n\n", encoding: "utf8" });
+  assert.match(piped.stdout, /## Files that depend on them \(2\)\n- `src\/lib\/index.ts` \(1 hop\)\n- `src\/main.ts` \(2 hops\)/);
 });
 
 test("CLI: notes add, list, edit, rm", () => {
@@ -112,7 +116,7 @@ test("MCP: every tool over a real stdio connection", async () => {
     assert.equal(client.getServerVersion()?.version, JSON.parse(readFileSync(join(import.meta.dirname, "../../package.json"), "utf8")).version);
     const { tools } = await client.listTools();
     assert.deepEqual(tools.map((t) => t.name).sort(), [
-      "add_note", "find_symbol", "get_context", "get_map", "read_symbol", "reindex", "remove_note", "search_symbols", "update_note",
+      "add_note", "affected", "find_symbol", "get_context", "get_map", "read_symbol", "reindex", "remove_note", "search_symbols", "update_note",
     ]);
 
     // no index yet: the first query builds it
@@ -123,6 +127,8 @@ test("MCP: every tool over a real stdio connection", async () => {
     assert.match((await call("read_symbol", { name: "run" })).text, /`src\/main.ts:4-6`/);
     assert.match((await call("search_symbols", { query: "app start" })).text, /method `App.start` at `src\/main.ts:9`/);
     assert.ok((await call("search_symbols", { query: "x", limit: 0 })).isError); // limit must be positive
+    assert.match((await call("affected", { files: ["src/lib/greet.ts"] })).text, /## Tests to run \(1\)\n- `src\/main.test.ts`/);
+    assert.ok((await call("affected", { files: [] })).isError); // at least one file
 
     // a file written while the server runs is found without calling reindex
     writeFileSync(join(root, "src/extra.ts"), "export function extra() {\n  return 1;\n}\n");

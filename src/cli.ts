@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { watch } from "node:fs";
+import { readFileSync, watch } from "node:fs";
 import { resolve } from "node:path";
-import { context, findSymbol, readSymbol, searchSymbols } from "./context.js";
+import { affected, context, findSymbol, formatAffected, readSymbol, searchSymbols } from "./context.js";
 import { writeGraph } from "./graph.js";
 import { isSource, renderMap, update, writeMap } from "./index.js";
 import { serve } from "./mcp.js";
@@ -16,6 +16,8 @@ const USAGE = `codemem <command> [--root <dir>]
   symbol <name|Class.method>           where it is defined and who uses it
   read <name|Class.method>             print its source code
   search <words...> [--limit N]        find functions/classes by rough name ("payment webhook")
+  affected <files...> [--stdin] [--depth N] [--quiet]
+                                       files and tests that depend on these files (git diff --name-only | ... --stdin)
   note add --kind <${KINDS.join("|")}> [--paths a,b] "<title>" ["<body>"]
   note edit <id> [--kind K] [--title T] [--body B] [--paths a,b]
   note rm <id>
@@ -47,6 +49,11 @@ try {
     console.log(findSymbol(root, rest[0]));
   } else if (cmd === "read" && rest[0]) {
     console.log(readSymbol(root, rest[0]));
+  } else if (cmd === "affected" && (rest.length || "stdin" in flags)) {
+    const files = "stdin" in flags ? readFileSync(0, "utf8").split(/\r?\n/) : rest; // git diff --name-only | ...
+    const depth = flags.depth ? Number(flags.depth) : undefined;
+    // --quiet: just the test files, one per line, to hand to a test runner
+    console.log("quiet" in flags ? affected(root, files, depth).tests.join("\n") : formatAffected(root, files, depth));
   } else if (cmd === "search" && rest[0]) {
     console.log(searchSymbols(root, rest.join(" "), flags.limit ? Number(flags.limit) : undefined));
   } else if (cmd === "note" && rest[0] === "add") {

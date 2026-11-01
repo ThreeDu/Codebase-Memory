@@ -4,7 +4,7 @@ Long-term memory for a codebase, so AI coding agents pick up its architecture wi
 
 - **Module map**: every TS/JS, Python, Go, Java, Rust, C/C++, and C# file with its resolved imports and packages, plus its entry points and most depended-on modules.
 - **Symbols**: the functions, classes, and methods each file defines, which names it takes from which file, and which of those each function calls, so you can ask where `ChurnPredictor` is defined and which functions use it.
-- **Notes**: architecture decisions, code conventions, and bugs that were already fixed, each attached to the files or folders it's about.
+- **Notes**: architecture decisions, code conventions, and bugs that were already fixed, each attached to the files or folders it's about. Comments tagged `WHY:`, `NOTE:`, `HACK:`, `IMPORTANT:`, `RATIONALE:` or `DECISION:` in the code count too, attached to the function they describe (credential-shaped strings in them are redacted).
 - **Incremental**: unchanged files aren't even read (same modification time and size), only changed content is re-parsed, and after an edit only the files around it are re-resolved. Tested on Kubernetes, LLVM, MongoDB, VS Code, Next.js, Godot, Django, React and Express.
 - **Selective context**: an agent asks about a file, folder, or keyword and gets back only the relevant notes, plus those files with their imports and importers.
 
@@ -35,7 +35,8 @@ codemem index path/to/repo
 | `context <file\|folder\|symbol\|keyword> [--budget N]` | Focused context, cut at N chars (default 8000) |
 | `symbol <name\|Class.method>` | Where a function/class is defined and which files and functions use it |
 | `read <name\|Class.method>` | Print just that function/class/method's source, with its line range |
-| `search <words...> [--limit N]` | Find functions/classes/methods by a rough name or a few words (`payment webhook`, `parseConfig`) |
+| `search <words...> [--limit N]` | Find functions/classes/methods by a rough name or a few words (`payment webhook`, `parseConfig`); code ranks before tests |
+| `affected <files...> [--stdin] [--depth N] [--quiet]` | Files and tests that depend on these files, through several import hops. `git diff --name-only \| codemem affected --stdin --quiet` lists the tests to run |
 | `note add --kind decision\|convention\|fix [--paths a,b] "<title>" ["<body>"]` | Save a note |
 | `note edit <id> [--kind K] [--title T] [--body B] [--paths a,b]` | Change only the given fields of a note |
 | `note rm <id>` | Delete a note |
@@ -60,7 +61,7 @@ claude mcp add codemem -- codemem mcp --root .
 
 On Windows use `-- cmd /c codemem mcp --root .`. Without installing anything: `-- npx -y @threedu/codebase-memory mcp --root .` (Windows: `-- cmd /c npx -y @threedu/codebase-memory mcp --root .`). From a clone: `-- node /path/to/Codebase-Memory/dist/src/cli.js mcp --root .`. Other MCP clients (Cursor, Codex, Gemini CLI, ...) run the same command; see [docs/USAGE.md](docs/USAGE.md#using-it-from-ai-agents-mcp).
 
-Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `search_symbols`, `read_symbol`, `add_note`, `update_note`, `remove_note`. Several agents (or an agent and `codemem watch`) can use one repo at once: files are written atomically and notes under a lock. A good line for the target repo's `CLAUDE.md`/`AGENTS.md`:
+Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `search_symbols`, `read_symbol` (also shows who uses it and whether a test does), `affected`, `add_note`, `update_note`, `remove_note`. Several agents (or an agent and `codemem watch`) can use one repo at once: files are written atomically and notes under a lock. A good line for the target repo's `CLAUDE.md`/`AGENTS.md`:
 
 > Before working on an area, call `get_context` for it; find code by a rough name with `search_symbols`, and read a single function with `read_symbol` instead of the whole file. Record decisions, conventions, and non-obvious bug fixes with `add_note`; fix or remove notes marked `⚠ missing` or no longer true.
 
@@ -76,7 +77,8 @@ Or give Claude Code the full usage guide as a skill. With the package installed 
 - Python: imports and symbols are found by regex, and absolute imports are looked up from the importing file's folder up to the repo root (so a service folder like `ml-service/` works as its own source root), then `src/`.
 - TS/JS aliases: `paths` and `baseUrl` from every `tsconfig*.json` / `jsconfig.json` are applied to files under that config's folder; `extends` is not followed.
 - `context`, `symbol`, `read` and the MCP tools re-index before answering. With nothing changed that's a check of every file's modification time: about 1–2 s on Kubernetes (14k files), 6–9 s on LLVM (77k). After an edit the whole index file is rewritten, which costs more on huge repos (about 5 s on Kubernetes, 14 s on LLVM). `codemem watch` is the opt-in file watcher.
-- Skipped: build output (`dist`, `build`, `target`, `obj`) and vendored dependencies (`vendor`, `third_party`, `thirdparty`, `3rdparty`), besides whatever `.gitignore` excludes.
+- Skipped: build output (`dist`, `build`, `target`, `obj`) and vendored dependencies (`vendor`, `third_party`, `thirdparty`, `3rdparty`), besides whatever `.gitignore` excludes. Source files over 5 MB are listed but never read (on 9 big repos those were test data and constant tables; files of 1–5 MB, like LLVM's X86ISelLowering.cpp, are read).
+- Monorepo packages imported by name (`import x from "shared/flags"` resolved through workspaces or a bundler alias) aren't linked to their files yet, only relative imports and tsconfig/jsconfig aliases are.
 - Big repos: when listing every file would make `map.md` longer than about 40,000 characters, its Modules section lists folders instead (as deep as fits), and Entry points shows the first 60.
 
 ## Develop

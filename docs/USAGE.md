@@ -19,7 +19,7 @@ Codebase Memory builds a long-term memory of a codebase: the module map, entry p
 - **git** (optional): if the project you index is a git repository, `.gitignore` is respected automatically
 - **Internet access** only for the graph view, which loads its drawing library from a CDN
 
-Supported source files: TypeScript / JavaScript (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, both ES modules and CommonJS), Python (`.py`), Go (`.go`), Java (`.java`), Rust (`.rs`), C/C++ (`.c .h .cc .cpp .cxx .hh .hpp .hxx`), and C# (`.cs`). Build output folders (`dist`, `build`, `target`, `obj`) are skipped.
+Supported source files: TypeScript / JavaScript (`.ts .tsx .mts .cts .js .jsx .mjs .cjs`, both ES modules and CommonJS), Python (`.py`), Go (`.go`), Java (`.java`), Rust (`.rs`), C/C++ (`.c .h .cc .cpp .cxx .hh .hpp .hxx`), and C# (`.cs`). Build output folders (`dist`, `build`, `target`, `obj`) are skipped. A source file over 5 MB is listed (imports of it still resolve) but never read, so its functions aren't indexed.
 
 ## Installation
 
@@ -66,6 +66,8 @@ Check that it works. Running it with no command prints the usage:
      symbol <name|Class.method>           where it is defined and who uses it
      read <name|Class.method>             print its source code
      search <words...> [--limit N]        find functions/classes by rough name ("payment webhook")
+     affected <files...> [--stdin] [--depth N] [--quiet]
+                                          files and tests that depend on these files (git diff --name-only | ... --stdin)
      note add --kind <decision|convention|fix> [--paths a,b] "<title>" ["<body>"]
      note edit <id> [--kind K] [--title T] [--body B] [--paths a,b]
      note rm <id>
@@ -226,9 +228,18 @@ export function greet(name: string) {
   return `Hello, ${name}`;
 }
 ```
+
+Used by: `src/lib/index.ts`; `src/main.ts` (run)
+⚠ No test file uses it directly.
+
+Comments about it:
+- WHY (line 1): greetings must stay ASCII for the legacy terminal
 ````
 
-Prints only that function, class, or method with its file and line range, so you (or an agent) don't have to open the whole file. If several files define the same name, each one is printed.
+Prints only that function, class, or method with its file and line range, so you (or an agent) don't have to open the whole file. If several files define the same name, each one is printed. After the code:
+
+- **Used by**: the files that use it, with the functions that call it: what an edit could break. A warning follows when none of them is a test file. Methods say instead that their callers (`obj.method()`) aren't tracked.
+- **Comments about it**: the `WHY:` / `NOTE:` / `HACK:` / ... comments just above it or inside it (see [Notes written in the code](#notes-written-in-the-code)).
 
 ### `search <words...>`: find something when you don't know its exact name
 
@@ -244,7 +255,47 @@ codemem search parseConfig --limit 5
 - function `paymentWebhookUrl` at `server/orders.ts:2` (exported)
 ```
 
-Names are split into words (`handlePaymentWebhook`, `handle_payment_webhook`), and every word you give must match one, exactly, as a prefix either way (`handler` finds `handle`), or inside it. For a method, its class's words count too, at half weight. Exact names come first, then names with your words side by side, then the rest; the file path breaks ties. Default 20 results; `--limit` changes that.
+Names are split into words (`handlePaymentWebhook`, `handle_payment_webhook`), and every word you give must match one, exactly, as a prefix either way (`handler` finds `handle`), or inside it. For a method, its class's words count too, at half weight. Ranking:
+
+- Code before tests: results in test files come last, unless your query mentions `test` or `spec`.
+- Rare words count more than common ones (`webhook` says more than `get`).
+- Exact names first, then names with your words side by side, then the rest; ties go to the file more other files import, then the file path.
+- If no name has every word, the names with most of them are shown instead, marked "closest first".
+
+Default 20 results; `--limit` changes that.
+
+### `affected <files...>`: what a change can break, and which tests to run
+
+```bash
+codemem affected src/lib/greet.ts
+git diff --name-only | codemem affected --stdin
+git diff --name-only main | codemem affected --stdin --quiet
+```
+
+```markdown
+# Affected by: src/lib/greet.ts
+
+## Tests to run (1)
+- `src/main.test.ts`
+
+## Files that depend on them (2)
+- `src/lib/index.ts` (1 hop)
+- `src/main.ts` (2 hops)
+```
+
+Follows the files that import the changed ones, then the files that import those, up to `--depth` hops (default 5). A test file ends the walk: it's listed under tests, and what imports a test isn't followed. `--quiet` prints only the test files, one per line, to hand to a test runner (for example in CI: `npx vitest run $(git diff --name-only HEAD | codemem affected --stdin --quiet)`). Paths are relative to the project root, as `git diff --name-only` prints them; anything that isn't an indexed source file is reported as not indexed.
+
+### Notes written in the code
+
+Comments tagged `WHY:`, `NOTE:`, `HACK:`, `IMPORTANT:`, `RATIONALE:` or `DECISION:` (uppercase, in `//`, `#`, or `/* */` comments) are picked up when files are indexed, together with the comment lines right below them that continue the text:
+
+```ts
+// WHY: 3 tries, because the gateway rate-limits
+// at 4 calls a minute per key
+export function retry() { ... }
+```
+
+Each is attached to the definition just below it or the one it sits in, and shows up in `context` (`- WHY :12 (retry): 3 tries, ...`) and after the code in `read`. Use them for reasons that belong next to the code; use `note add` for decisions spanning several files. Credential-shaped strings in them (API keys, tokens, JWTs, `password=...`, passwords in URLs) are replaced with `[redacted]` before they're stored; that catches common shapes only, so keep secrets out of comments anyway. Lowercase `Note:` in ordinary prose is ignored.
 
 ### `note add`: remember a decision, convention, or fix
 
@@ -379,6 +430,7 @@ Use an absolute `--root` unless you know the client starts servers inside the pr
 | `find_symbol` | `name` (`name` or `Class.method`) | Same as `codemem symbol` |
 | `search_symbols` | `query`, optional `limit` | Same as `codemem search` |
 | `read_symbol` | `name` (`name` or `Class.method`) | Same as `codemem read` |
+| `affected` | `files`, optional `depth` | Same as `codemem affected` |
 | `add_note` | `kind`, `title`, optional `body`, `paths` | Saves a note |
 | `update_note` | `id`, optional `kind`, `title`, `body`, `paths` | Same as `codemem note edit` |
 | `remove_note` | `id` | Same as `codemem note rm` |

@@ -3,7 +3,7 @@ import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, write
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { context, findSymbol, readSymbol, searchSymbols } from "../src/context.js";
+import { affected, context, findSymbol, formatAffected, readSymbol, searchSymbols } from "../src/context.js";
 import { writeGraph } from "../src/graph.js";
 import { definedIn, entryPoints, isSource, renderMap, resolvedCalls, update } from "../src/index.js";
 import { addNote, loadNotes, removeNote, updateNote, type Note } from "../src/notes.js";
@@ -354,6 +354,82 @@ test("searches symbols by rough name or words", () => {
   assert.match(lines("PaymentService")[0], /class `PaymentService`/); // exact name first, before its methods
   assert.match(searchSymbols(dir, "invoice"), /No function, class or method matches `invoice`/);
   assert.match(searchSymbols(dir, "pay", 1), /…and \d+ more/);
+  // tests rank below the code they test, unless the query asks for tests
+  put("server/payments.test.ts", `export function handlePaymentWebhookCase() {}\n`);
+  assert.match(lines("handle payment webhook")[0], /server\/payments.ts/);
+  assert.match(lines("payment webhook test")[0], /server\/payments.test.ts/);
+  // no name has every word: the closest ones instead of nothing
+  assert.match(searchSymbols(dir, "payment webhook invoice"), /none has every word: closest first[\s\S]*handlePaymentWebhook/);
+});
+
+test("affected: dependents through several hops, and the tests among them", () => {
+  const dir = copyFixture("sample");
+  // greet.ts <- lib/index.ts (barrel) <- main.ts <- main.test.ts
+  assert.deepEqual(affected(dir, ["src/lib/greet.ts"]), {
+    tests: ["src/main.test.ts"],
+    files: [["src/lib/index.ts", 1], ["src/main.ts", 2]],
+    unknown: [],
+  });
+  assert.deepEqual(affected(dir, ["src/lib/greet.ts"], 1).files, [["src/lib/index.ts", 1]]); // depth limit
+  assert.deepEqual(affected(dir, ["./src/main.test.ts", "README.md"]), { tests: ["src/main.test.ts"], files: [], unknown: ["README.md"] });
+  assert.match(formatAffected(dir, ["src/orphan.ts"]), /No test depends on these files within 5 import hops/);
+});
+
+test("read_symbol shows who uses it and whether a test does", () => {
+  const dir = copyFixture("sample");
+  const greet = readSymbol(dir, "greet");
+  assert.match(greet, /Used by: `src\/lib\/index.ts`; `src\/main.ts` \(run\)/);
+  assert.match(greet, /⚠ No test file uses it directly/);
+  assert.match(readSymbol(dir, "App.start"), /Callers of methods aren't tracked/);
+  assert.match(readSymbol(dir, "App"), /Used by: nothing in the indexed code/);
+});
+
+test("WHY/NOTE comments become notes attached to the code they explain", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codemem-"));
+  const put = (f: string, src: string) => {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), src);
+  };
+  put("src/retry.ts", [
+    "// HACK: upstream sends dates without a timezone",
+    "export function retry() {",
+    "  // WHY: 3 tries, because the gateway rate-limits",
+    "  // at 4 calls a minute per key",
+    "  return 3;",
+    "}",
+    "",
+    "// Note: ordinary prose isn't a tag",
+    "/* NOTE: token=ghp_0123456789abcdefghijklmnopqrstuvwxyzAB for the mock */",
+    "export const MOCK = 1;",
+  ].join("\n"));
+  put("ml/train.py", "# DECISION: train on CPU so CI needs no GPU\ndef train():\n    return 1\n");
+  const { index } = update(dir);
+  assert.deepEqual(index.files["src/retry.ts"].whys, [
+    { line: 1, tag: "HACK", text: "upstream sends dates without a timezone" },
+    { line: 3, tag: "WHY", text: "3 tries, because the gateway rate-limits at 4 calls a minute per key" }, // two lines joined
+    { line: 9, tag: "NOTE", text: "token=[redacted] for the mock" }, // secrets never stored
+  ]);
+  const ctx = context(dir, "src/retry.ts");
+  assert.match(ctx, /- HACK :1 \(retry\): upstream sends dates/); // the comment just above a definition is about it
+  assert.match(ctx, /- WHY :3 \(retry\): 3 tries/); // inside it, too
+  assert.match(ctx, /- NOTE :9 \(MOCK\): token=\[redacted\]/);
+  assert.match(readSymbol(dir, "retry"), /Comments about it:\n- HACK \(line 1\): upstream[^\n]*\n- WHY \(line 3\): 3 tries/);
+  assert.match(context(dir, "ml"), /- DECISION :1 \(train\): train on CPU/);
+});
+
+test("files over 5 MB are known but never read", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codemem-"));
+  mkdirSync(join(dir, "src"));
+  writeFileSync(join(dir, "src/huge.js"), `export function hidden() {}\n// ${"x".repeat(5 * 1024 * 1024)}\n`);
+  writeFileSync(join(dir, "src/app.js"), `import { hidden } from "./huge.js";\nexport const run = () => hidden();\n`);
+  const { index } = update(dir);
+  assert.equal(index.files["src/huge.js"].oversize, true);
+  assert.deepEqual(index.files["src/huge.js"].symbols, []);
+  assert.deepEqual(index.files["src/app.js"].imports, ["src/huge.js"]); // imports to it still resolve
+  assert.match(renderMap(dir, index), /`src\/huge.js` \(over 5 MB, not read\)/);
+  // shrinking it under the limit gets it read
+  writeFileSync(join(dir, "src/huge.js"), "export function hidden() {}\n");
+  assert.deepEqual(update(dir).index.files["src/huge.js"].symbols.map((s) => s.name), ["hidden"]);
 });
 
 test("watch reacts only to indexed source files", () => {

@@ -16,6 +16,56 @@ export interface Parsed {
   main?: boolean; // runs on its own (Python `if __name__ == "__main__":`), even if other files import it
   namespaces?: string[]; // C#: namespaces this file declares
   refs?: string[]; // C#: every name the file mentions, including top-level statements outside any class
+  whys?: Why[]; // `// WHY: ...`-style comments: the reasons written next to the code
+  oversize?: boolean; // over the size limit: known (imports to it resolve) but never read
+}
+export interface Why {
+  line: number;
+  tag: string;
+  text: string;
+}
+
+const WHY_TAG = /^\s*(\/\/+|#+|\/\*+|\*+)\s*(WHY|NOTE|HACK|IMPORTANT|RATIONALE|DECISION)\s*:\s*(.*)$/;
+// credential shapes (as graphify redacts them): risk reduction for a token pasted into a comment, not a guarantee
+const SECRET = new RegExp(
+  [
+    "-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*",
+    "(?<![A-Za-z0-9])(?:AKIA|ASIA)[0-9A-Z]{16}(?![A-Za-z0-9])",
+    "(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{36,}",
+    "(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{22,}",
+    "(?<![A-Za-z0-9])xox[abeoprs]-[A-Za-z0-9-]{10,}",
+    "(?<![A-Za-z0-9])[sr]k_(?:live|test)_[A-Za-z0-9]{10,}",
+    "(?<![A-Za-z0-9])sk-(?:ant-|proj-)?(?=[A-Za-z0-9_-]*[0-9])[A-Za-z0-9_-]{20,}",
+    "(?<![A-Za-z0-9])AIza[0-9A-Za-z_-]{35}",
+    "(?<![A-Za-z0-9])eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{2,}\\.[A-Za-z0-9_-]{10,}",
+    "(?<=\\bBearer )[A-Za-z0-9._~+/=-]{16,}",
+    "(?<=://)[^\\s/@]*:[^\\s?#]*(?=@[^\\s@/?#]+)",
+    "(?<=\\b(?:password|passwd|pwd|secret|token|api[_-]?key)\\s*[=:]\\s*)[^\\s,;]{6,}",
+  ].join("|"),
+  "gi",
+);
+
+/** `// WHY: ...`, `# NOTE: ...`, `/* HACK: ... *\/` comments, with the comment lines right after them that carry on the
+ * text. Uppercase tags only, so ordinary prose ("Note: ...") isn't picked up. */
+export function whyComments(src: string): Why[] {
+  const lines = src.split(/\r?\n/);
+  const out: Why[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const m = lines[i].match(WHY_TAG);
+    if (!m) continue;
+    const marker = m[1].startsWith("//") ? "//" : m[1].startsWith("#") ? "#" : "*";
+    let text = m[3];
+    for (let j = i + 1; j < lines.length && text.length < 300; j++) {
+      const t = lines[j].trim();
+      if (WHY_TAG.test(lines[j]) || !t.startsWith(marker) || t.startsWith("*/")) break;
+      const more = t.replace(/^(\/\/+|#+|\*+)\s?/, "").trim();
+      if (!more) break;
+      text += ` ${more}`;
+    }
+    text = text.replace(/\*\/\s*$/, "").replace(/\s+/g, " ").trim().replace(SECRET, "[redacted]");
+    if (text) out.push({ line: i + 1, tag: m[2], text: text.length > 300 ? `${text.slice(0, 299)}…` : text });
+  }
+  return out;
 }
 
 const pushUnique = (m: Record<string, string[]>, k: string, v: string) => {

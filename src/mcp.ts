@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { context, findSymbol, readSymbol, searchSymbols } from "./context.js";
+import { context, findSymbol, formatAffected, readSymbol, searchSymbols } from "./context.js";
 import { renderMap, update, writeMap } from "./index.js";
 import { addNote, KINDS, removeNote, updateNote } from "./notes.js";
 
@@ -67,10 +67,23 @@ export async function serve(root: string): Promise<void> {
   );
 
   server.registerTool(
+    "affected",
+    {
+      description:
+        "What a change to these files can break: the files that depend on them, directly or through others, and the tests among them to run. Pass the files you changed or are about to change (repo-relative paths).",
+      inputSchema: {
+        files: z.array(z.string()).min(1),
+        depth: z.number().int().positive().max(20).optional().describe("Max import hops to follow (default 5)"),
+      },
+    },
+    async ({ files, depth }) => text(formatAffected(root, files, depth)),
+  );
+
+  server.registerTool(
     "read_symbol",
     {
       description:
-        "Source code of one function, class or method, with its file and line range. Read this instead of the whole file. Accepts 'name' or 'Class.method'.",
+        "Source code of one function, class or method, with its file and line range, plus who uses it (what an edit could break, and a warning when no test uses it) and the WHY/NOTE comments about it. Read this instead of the whole file. Accepts 'name' or 'Class.method'.",
       inputSchema: { name: z.string().min(1) },
     },
     async ({ name }) => text(readSymbol(root, name)),

@@ -5,10 +5,13 @@ import { join, posix } from "node:path";
 import ts from "typescript";
 import { writeAtomic } from "./files.js";
 import { loadNotes, staleMark } from "./notes.js";
-import { parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, type Parsed } from "./parse.js";
+import { parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, whyComments, type Parsed } from "./parse.js";
 
 export const STORE = ".codemem";
-const VERSION = 8; // bump when parse output changes, so cached entries get re-parsed
+const VERSION = 9; // bump when parse output changes, so cached entries get re-parsed
+// Measured on 9 big repos: files over 1 MB include core code (LLVM's X86ISelLowering.cpp, 2.6 MB; Kubernetes'
+// generated.pb.go, 1.6 MB, imported by 2.5k files), while those over 5 MB were test data, constant tables and fixtures
+export const MAX_READ_BYTES = 5 * 1024 * 1024;
 const CODE = /\.(ts|tsx|mts|cts|js|jsx|mjs|cjs|py|go|java|rs|c|h|cc|cpp|cxx|hh|hpp|hxx|cs)$/;
 const EXTS = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs"];
 // build output and vendored dependencies (other people's code: on Kubernetes or MongoDB it's a third of the files)
@@ -39,6 +42,8 @@ const storePath = (root: string, name: string) => join(root, STORE, name);
 
 /** Whether a changed path (as fs.watch reports it, any separator) is a source file the index covers. */
 export const isSource = (f: string) => CODE.test(f) && !f.split(/[\\/]/).some((part) => SKIP.has(part));
+/** The one notion of a test file, shared by entry points, search ranking and `affected`. */
+export const isTest = (f: string) => TEST.test(f);
 
 export function loadIndex(root: string): Index {
   const p = storePath(root, "index.json");
@@ -227,13 +232,16 @@ for (const ext of ["c", "h", "cc", "cpp", "cxx", "hh", "hpp", "hxx"]) LANG_BY_EX
 const langOf = (f: string): Lang => LANG_BY_EXT[f.slice(f.lastIndexOf(".") + 1)] ?? "ts";
 
 function parse(lang: Lang, f: string, src: string): Parsed {
-  if (lang === "py") return parsePy(src);
-  if (lang === "go") return parseGo(src);
-  if (lang === "java") return parseJava(src);
-  if (lang === "rs") return parseRust(src);
-  if (lang === "c") return parseC(src);
-  if (lang === "cs") return parseCSharp(src);
-  return parseTs(f, src);
+  const p =
+    lang === "py" ? parsePy(src)
+    : lang === "go" ? parseGo(src)
+    : lang === "java" ? parseJava(src)
+    : lang === "rs" ? parseRust(src)
+    : lang === "c" ? parseC(src)
+    : lang === "cs" ? parseCSharp(src)
+    : parseTs(f, src);
+  const whys = whyComments(src);
+  return whys.length ? { ...p, whys } : p;
 }
 
 function resolveSpec(lang: Lang, f: string, s: string, ctx: Ctx): string[] {
@@ -334,7 +342,12 @@ export function update(root: string): { index: Index; parsed: number } {
     let p: Parsed | undefined;
     let hash: string;
     if (same && untouched(f)) [p, hash] = [prev, prev.hash];
-    else {
+    else if (st.size > MAX_READ_BYTES) {
+      // never read: hashing a multi-GB blob can exhaust memory; its size stands in for the hash
+      hash = `oversize:${st.size}`;
+      p = { specs: [], names: {}, symbols: [], oversize: true };
+      if (!(same && prev?.hash === hash)) edited.push(f);
+    } else {
       const src = readFileSync(join(root, f), "utf8");
       hash = createHash("sha1").update(src).digest("hex");
       p = same && prev?.hash === hash ? prev : undefined; // touched but not edited (checkout, save without changes)
@@ -343,8 +356,8 @@ export function update(root: string): { index: Index; parsed: number } {
         edited.push(f);
       }
     }
-    const { specs, names, symbols, main, namespaces, refs } = p;
-    const parsedPart = { specs, names, symbols, main, namespaces, refs };
+    const { specs, names, symbols, main, namespaces, refs, whys, oversize } = p;
+    const parsedPart = { specs, names, symbols, main, namespaces, refs, whys, oversize };
     index.files[f] = { hash, mtime: st.mtimeMs, size: st.size, ...parsedPart, imports: [], external: [], uses: {} };
   }
 
@@ -526,7 +539,7 @@ function modulesSection(index: Index, files: string[], depth?: number): string[]
       dir = d;
       const e = index.files[f];
       const deps = [...e.imports, ...e.external.map((x) => `pkg:${x}`)];
-      lines.push(`- \`${f}\`${deps.length ? ` → ${deps.join(", ")}` : ""}`);
+      lines.push(`- \`${f}\`${e.oversize ? " (over 5 MB, not read)" : ""}${deps.length ? ` → ${deps.join(", ")}` : ""}`);
       const defs = e.symbols.filter((s) => !s.parent && s.kind !== "const");
       if (defs.length) lines.push(`  - defines: ${defs.map((s) => (s.kind === "class" ? `class ${s.name}` : s.name)).join(", ")}`);
     }
