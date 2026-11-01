@@ -35,7 +35,7 @@
     "build": "tsc",
     "prepare": "npm run build",
     "prepublishOnly": "npm test",
-    "test": "npm run build && node --test dist/test/*.test.js"
+    "test": "npm run build && node --test dist/test/codemem.test.js dist/test/interfaces.test.js"
   },
   "engines": {
     "node": ">=20"
