@@ -1,6 +1,6 @@
 {
   "name": "@threedu/codebase-memory",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Long-term codebase memory for AI coding agents: module map, entry points, and notes, served over CLI and MCP.",
   "keywords": [
     "mcp",
