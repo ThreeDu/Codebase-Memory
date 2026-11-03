@@ -375,6 +375,33 @@ test("affected: dependents through several hops, and the tests among them", () =
   assert.match(formatAffected(dir, ["src/orphan.ts"]), /No test depends on these files within 5 import hops/);
 });
 
+test("monorepo: workspace packages imported by name, tests just past the hop limit", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codemem-"));
+  const put = (f: string, src: string) => {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), src);
+  };
+  put("package.json", `{ "private": true, "workspaces": ["packages/*"] }`);
+  // main points at build output, which isn't indexed: its source is used instead
+  put("packages/core/package.json", `{ "name": "@acme/core", "main": "dist/index.js" }`);
+  put("packages/core/src/index.ts", `export function charge() {}\n`);
+  put("packages/shared/package.json", `{ "name": "shared" }`);
+  put("packages/shared/flags.js", `export const enabled = true;\n`);
+  put("packages/app/package.json", `{ "name": "app", "exports": { ".": { "import": "./src/app.ts" } } }`);
+  put("packages/app/src/app.ts", `import { charge } from "@acme/core";\nimport { enabled } from "shared/flags";\nimport { gone } from "shared/missing";\nimport React from "react";\nexport const run = () => charge();\n`);
+  put("packages/app/test/app.test.ts", `import { run } from "app";\n`);
+  // a test fixture reusing a real package name must not take it over
+  put("packages/app/test/fixtures/fake-core/package.json", `{ "name": "@acme/core", "main": "x.js" }`);
+  const { index } = update(dir);
+  assert.deepEqual(index.files["packages/app/src/app.ts"].imports, ["packages/core/src/index.ts", "packages/shared/flags.js"]);
+  assert.deepEqual(index.files["packages/app/src/app.ts"].external, ["react"]); // shared/missing is ours, not a package
+  assert.deepEqual(index.files["packages/app/test/app.test.ts"].imports, ["packages/app/src/app.ts"]); // via exports["."].import
+  assert.deepEqual(callsOf(index, "packages/app/src/app.ts", "run"), ["charge@packages/core/src/index.ts"]);
+  assert.deepEqual(affected(dir, ["packages/core/src/index.ts"]).tests, ["packages/app/test/app.test.ts"]);
+  // the test is 2 hops away: with a 1-hop limit it's still found, being a leaf right past the limit
+  assert.deepEqual(affected(dir, ["packages/core/src/index.ts"], 1), { tests: ["packages/app/test/app.test.ts"], files: [["packages/app/src/app.ts", 1]], unknown: [] });
+});
+
 test("read_symbol shows who uses it and whether a test does", () => {
   const dir = copyFixture("sample");
   const greet = readSymbol(dir, "greet");
@@ -446,7 +473,8 @@ test("watch reacts only to indexed source files", () => {
 test("writes the graph page with embedded data", () => {
   addNote(root, { kind: "fix", title: "</script><b>xss", paths: ["src/main.ts"] });
   const html = readFileSync(writeGraph(root), "utf8");
-  assert.match(html, /"path":"src\/main.ts"/);
+  assert.match(html, /"path":"src\/main.ts","lang":"TypeScript","test":false/);
+  assert.match(html, /"path":"src\/main.test.ts","lang":"TypeScript","test":true/); // drawn dashed, hidden by "Hide tests"
   assert.match(html, /"entry":true/);
   // the note's "</script>" is escaped, so closing tags match the page's own opening tags
   assert.equal(html.match(/<\/script>/g)?.length, html.match(/<script/g)?.length);

@@ -37,7 +37,7 @@ codemem keeps a map of this repo (files, imports, entry points, functions/classe
 
 - Everything comes back empty, or `get_map` says 0 source files: the project is in a folder git ignores, or in a language codemem doesn't read. Fall back to normal search.
 - Not indexed at all: build output (`dist`, `build`, `target`, `obj`), vendored code (`vendor`, `third_party`, `thirdparty`, `3rdparty`) and anything `.gitignore` excludes. Search those directly. A file marked "over 5 MB, not read" is listed but its contents aren't indexed.
-- `affected` finds few files in a monorepo: packages imported by name (`shared/flags` through workspaces or a bundler alias) aren't linked yet; only relative imports and tsconfig/jsconfig aliases are.
+- An import shows as an outside package though the code is in the repo: it goes through a bundler or Jest alias (`resolve.alias`, `moduleNameMapper`), which codemem doesn't read; workspace packages (named in a `package.json`) and tsconfig/jsconfig aliases are linked. `affected` then misses what depends through that import.
 - Indexed: TS/JS, Python, Go, Java, Rust, C/C++, C#. Config, SQL, CSS, templates and other languages: normal search.
 - Everything but TS/JS is read by regex: if a `read_symbol` range looks cut short or too long, open the file at that line.
 - C/C++: a function can show up twice (declared in the header's class, defined in the .cpp); the one with a body is in the source file.

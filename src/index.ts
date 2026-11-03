@@ -36,7 +36,7 @@ export interface Index {
   fingerprint?: string; // config files that change how imports resolve (go.mod, Cargo.toml, tsconfig), with mtimes
   files: Record<string, FileEntry>;
 }
-const CONFIG = /^(go\.mod|Cargo\.toml|(tsconfig.*|jsconfig)\.json)$/;
+const CONFIG = /^(go\.mod|Cargo\.toml|(tsconfig.*|jsconfig)\.json|package\.json)$/;
 
 const storePath = (root: string, name: string) => join(root, STORE, name);
 
@@ -110,6 +110,22 @@ interface Ctx {
   goMods: [string, string][]; // go.mod folder, module path; longest path first
   crates: [string, string][]; // Cargo.toml folder, library name (how other crates and the crate's own main.rs call it)
   tsPaths: TsPaths[]; // tsconfig*.json / jsconfig.json with baseUrl or paths; deepest folder first
+  workspace: [string, { dir: string; entry?: string }][]; // monorepo packages: package.json name -> folder; longest name first
+}
+
+/** The workspace package a bare import names (`shared/flags`, `@acme/core`), or undefined for an outside package. */
+const workspaceOf = (spec: string, ctx: Ctx) => ctx.workspace.find(([name]) => spec === name || spec.startsWith(`${name}/`));
+
+/** Files a workspace import may point at: the path inside the package, or for the bare name its main/module/exports
+ * entry. An entry in build output (`dist/index.js`) is tried as its source too (`src/index`), since build output isn't
+ * indexed. shortcut: pattern `exports` ("./*": ...) aren't followed; add them when a monorepo needs it. */
+function workspaceTargets(spec: string, ctx: Ctx): string[] {
+  const hit = workspaceOf(spec, ctx);
+  if (!hit) return [];
+  const [name, { dir, entry }] = hit;
+  if (spec !== name) return [posix.join(dir, spec.slice(name.length + 1))];
+  const fromBuild = entry && posix.join(dir, entry.replace(/^(\.\/)?(dist|build|lib|out)\/(src\/)?/, "src/"));
+  return [entry && posix.join(dir, entry), fromBuild, posix.join(dir, "index"), posix.join(dir, "src/index")].filter((c): c is string => !!c);
 }
 interface TsPaths {
   dir: string; // the config's folder: it applies to files under it
@@ -253,14 +269,15 @@ function resolveSpec(lang: Lang, f: string, s: string, ctx: Ctx): string[] {
   if (lang === "c") return resolveC(f, s, ctx);
   if (lang === "cs") return []; // namespaces are matched to files after every file is parsed
   if (s.startsWith(".")) return one(resolve(f, s, ctx.known));
-  const candidates = [...(aliasTargets(f, s, ctx) ?? []), ...fromBaseUrl(f, s, ctx)];
+  const candidates = [...(aliasTargets(f, s, ctx) ?? []), ...workspaceTargets(s, ctx), ...fromBaseUrl(f, s, ctx)];
   return one(candidates.map((c) => resolve("", c, ctx.known)).find(Boolean));
 }
 
 /** The package an unresolved import comes from, or undefined when it points into this repo. */
 function externalOf(lang: Lang, f: string, s: string, ctx: Ctx): string | undefined {
   // an alias whose file is missing is still this repo's code, not a package named "@"
-  if (lang === "ts") return s.startsWith(".") || aliasTargets(f, s, ctx) ? undefined : packageName(s);
+  // an alias or a workspace package whose file is missing is still this repo's code, not a package named "@" or "shared"
+  if (lang === "ts") return s.startsWith(".") || aliasTargets(f, s, ctx) || workspaceOf(s, ctx) ? undefined : packageName(s);
   if (lang === "py") {
     // "pkg.func" won't resolve to a file; only call it external when the top-level package isn't local
     const top = s.split(".")[0];
@@ -308,7 +325,7 @@ export function update(root: string): { index: Index; parsed: number } {
     if (!existsSync(storePath(root, "map.md"))) writeMap(root, old);
     return { index: old, parsed: 0 };
   }
-  const ctx: Ctx = { known: new Set(files), byDir: new Map(), byName: new Map(), goMods: [], crates: [], tsPaths: [] };
+  const ctx: Ctx = { known: new Set(files), byDir: new Map(), byName: new Map(), goMods: [], crates: [], tsPaths: [], workspace: [] };
   for (const f of files) {
     push(ctx.byDir, posix.dirname(f), f);
     push(ctx.byName, posix.basename(f), f);
@@ -333,6 +350,23 @@ export function update(root: string): { index: Index; parsed: number } {
     ctx.tsPaths.push({ dir, base: posix.join(dir, opts.baseUrl ?? "."), baseUrl: !!opts.baseUrl, paths });
   }
   ctx.tsPaths.sort((a, b) => b.dir.length - a.dir.length);
+  // monorepo packages (npm/yarn/pnpm workspaces, Lerna, Nx, Turborepo all name them in package.json); test fixtures
+  // often reuse real package names, so they're left out, and the shallowest folder wins a name used twice
+  const named = new Map<string, { dir: string; entry?: string }>();
+  for (const f of all.filter((f) => posix.basename(f) === "package.json" && !isTest(f)).sort((a, b) => a.split("/").length - b.split("/").length)) {
+    let pkg: { name?: unknown; main?: unknown; module?: unknown; exports?: unknown };
+    try {
+      pkg = JSON.parse(readFileSync(join(root, f), "utf8"));
+    } catch {
+      continue; // a broken package.json just isn't a workspace package
+    }
+    if (typeof pkg.name !== "string" || named.has(pkg.name)) continue;
+    const dot = (pkg.exports as Record<string, unknown> | undefined)?.["."];
+    const cond = dot && typeof dot === "object" ? (dot as Record<string, unknown>) : undefined;
+    const entry = [pkg.main, pkg.module, pkg.exports, dot, cond?.import, cond?.require, cond?.default].find((e) => typeof e === "string");
+    named.set(pkg.name, { dir: posix.dirname(f), entry: entry as string | undefined });
+  }
+  ctx.workspace = [...named].sort((a, b) => b[0].length - a[0].length);
 
   const index: Index = { version: VERSION, fingerprint, files: {} };
   const edited: string[] = []; // new files and files whose content changed

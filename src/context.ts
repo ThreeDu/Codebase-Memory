@@ -102,13 +102,16 @@ export function affected(root: string, changed: string[], depth = 5) {
       const seen = new Set([c]);
       while (queue.length) {
         const [f, d] = queue.shift()!;
-        if (d >= depth) continue;
         for (const g of importers.get(f) ?? []) {
           if (seen.has(g)) continue;
-          seen.add(g);
-          if (isTest(g)) tests.add(g);
-          else {
-            hops.set(g, Math.min(hops.get(g) ?? Infinity, d + 1));
+          // a test is a leaf, so one importing a file at the limit is still listed: in React the tests sit 6 hops
+          // from ReactFiberWorkLoop (test -> react-noop-renderer -> ... -> ReactFiberReconciler -> WorkLoop)
+          if (isTest(g)) {
+            seen.add(g);
+            tests.add(g);
+          } else if (d < depth) {
+            seen.add(g);
+            hops.set(g, Math.min(hops.get(g) ?? Infinity, d + 1)); // another changed file may reach it in fewer hops
             queue.push([g, d + 1]);
           }
         }

@@ -49,7 +49,7 @@ All commands accept `--root <dir>` (default: the current directory). From a clon
 
 ## Graph view
 
-`codemem graph` opens an interactive map of the whole codebase: folders are boxes, files are dots (bigger = more importers, orange ring = entry point), arrows are imports. Click a file to highlight what it imports and what imports it (highlighted arrows show the imported names), with its functions/classes, what each one calls, and its notes in the side panel; click a folder for its files; type a file or function name in the search box and press Enter to jump to it. The page is a single file with the data embedded (it loads Cytoscape and its fcose layout from cdnjs/jsDelivr, so it needs internet). It's regenerated on every run, so you may want `.codemem/graph.html` in the target repo's `.gitignore`.
+`codemem graph` opens an interactive map of the whole codebase: folders are boxes (single-folder chains merged into one), files are dots colored by language with a legend (bigger = more importers, orange ring = entry point, faded and dashed = test), arrows are imports. The page is dark. Hover for a summary; click a file to highlight what it imports in blue and what imports it in green (labelled with the imported names), and its functions/classes, what each one calls, and its notes in the side panel; click a folder for its files; **Hide tests** shows just the app's own structure; type a file or function name in the search box and press Enter to jump to it. The page is a single file with the data embedded (it loads Cytoscape and its fcose layout from cdnjs/jsDelivr, so it needs internet). It's regenerated on every run, so you may want `.codemem/graph.html` in the target repo's `.gitignore`.
 
 ## Use from Claude Code (MCP)
 
@@ -78,7 +78,7 @@ Or give Claude Code the full usage guide as a skill. With the package installed 
 - TS/JS aliases: `paths` and `baseUrl` from every `tsconfig*.json` / `jsconfig.json` are applied to files under that config's folder; `extends` is not followed.
 - `context`, `symbol`, `read` and the MCP tools re-index before answering. With nothing changed that's a check of every file's modification time: about 1–2 s on Kubernetes (14k files), 6–9 s on LLVM (77k). After an edit the whole index file is rewritten, which costs more on huge repos (about 5 s on Kubernetes, 14 s on LLVM). `codemem watch` is the opt-in file watcher.
 - Skipped: build output (`dist`, `build`, `target`, `obj`) and vendored dependencies (`vendor`, `third_party`, `thirdparty`, `3rdparty`), besides whatever `.gitignore` excludes. Source files over 5 MB are listed but never read (on 9 big repos those were test data and constant tables; files of 1–5 MB, like LLVM's X86ISelLowering.cpp, are read).
-- Monorepo packages imported by name (`import x from "shared/flags"` resolved through workspaces or a bundler alias) aren't linked to their files yet, only relative imports and tsconfig/jsconfig aliases are.
+- Monorepos: a package of the repo imported by name (`shared/flags`, `@acme/core`) is linked to its files through its `package.json` `name` (npm/yarn/pnpm workspaces, Lerna, Nx, Turborepo); the bare name goes to its `main`/`module`/`exports["."]`, or its source when that points into `dist/`. Pattern `exports` (`"./*"`) and bundler or Jest aliases (`resolve.alias`, `moduleNameMapper`) aren't followed.
 - Big repos: when listing every file would make `map.md` longer than about 40,000 characters, its Modules section lists folders instead (as deep as fits), and Entry points shows the first 60.
 
 ## Develop

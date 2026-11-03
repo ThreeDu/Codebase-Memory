@@ -283,7 +283,7 @@ git diff --name-only main | codemem affected --stdin --quiet
 - `src/main.ts` (2 hops)
 ```
 
-Follows the files that import the changed ones, then the files that import those, up to `--depth` hops (default 5). A test file ends the walk: it's listed under tests, and what imports a test isn't followed. `--quiet` prints only the test files, one per line, to hand to a test runner (for example in CI: `npx vitest run $(git diff --name-only HEAD | codemem affected --stdin --quiet)`). Paths are relative to the project root, as `git diff --name-only` prints them; anything that isn't an indexed source file is reported as not indexed.
+Follows the files that import the changed ones, then the files that import those, up to `--depth` hops (default 5). A test file ends the walk: it's listed under tests, and what imports a test isn't followed. Since a test adds nothing further, a test importing a file at the limit is listed too: in React the tests reach `ReactFiberWorkLoop.js` in 6 hops, through `react-noop-renderer` and `react-reconciler`. In a monorepo, packages imported by name are followed through their `package.json` (see the Troubleshooting row on aliases). `--quiet` prints only the test files, one per line, to hand to a test runner (for example in CI: `npx vitest run $(git diff --name-only HEAD | codemem affected --stdin --quiet)`). Paths are relative to the project root, as `git diff --name-only` prints them; anything that isn't an indexed source file is reported as not indexed.
 
 ### Notes written in the code
 
@@ -354,19 +354,25 @@ In the graph:
 
 | What you see | Meaning |
 |---|---|
-| Box | A folder (nested like the folder tree) |
-| Dot | A file. Bigger = imported by more files. Color = top-level folder |
+| Box | A folder, nested like the folder tree. A chain of folders that only hold one folder each (`src/main/java/com/shop/`) is one box. The outermost folders' names stay readable at any zoom |
+| Dot | A file. Color = language (the legend under the header lists the repo's languages with file counts). Bigger = imported by more files |
+| Faded dot with a dashed border | A test file (fixtures included) |
 | Orange ring | Entry point |
+| Arrow | "imports". When a file is selected, what it imports turns blue and what imports it turns green, each labelled with the names taken |
 | "⚠ out of date" in the header | Notes whose files or folders no longer exist. They are listed in the side panel when the page opens (amber border), since a deleted file has no dot to click |
-| Arrow | "imports". Highlighted arrows are labelled with the imported names |
+
+File names appear once you zoom in far enough to read them.
 
 | What you do | What happens |
 |---|---|
-| Click a file | Its imports and importers are highlighted. The side panel lists its functions/classes, what each calls, its imports and importers with names, and its notes |
-| Click a name in the side panel | Jumps to the file that defines it |
-| Click a folder box | Lists the folder's files and notes |
-| Type in the search box + Enter | Jumps to a file by path, or to the file that defines a function/class by name |
-| Click empty space | Clears the highlight |
+| Hover a dot or box | A summary: path, language, how many files it imports and is imported by, how many functions it defines (for a folder: its file count) |
+| Click a file | Its imports (blue) and importers (green) are highlighted, everything else fades; the view doesn't move. The side panel lists its functions/classes, what each calls, its imports and importers with names, and its notes |
+| Click a name in the side panel | Selects the file that defines it, panning to it (same zoom) if it's off-screen |
+| Click a folder box | The side panel lists the folder's files and notes |
+| Type in the search box + Enter | Selects a file by path, or the file that defines a function/class by name, panning to it if it's off-screen |
+| **Hide tests** | Hides test files (and folders left empty) and lays the rest out again: often half the dots disappear and the app's own structure shows |
+| **Fit** | Zooms to show everything visible |
+| Click empty space, or Esc | Clears the highlight |
 | Scroll / drag | Zoom / pan |
 
 ### `watch`: keep the map and graph up to date
@@ -508,6 +514,7 @@ All files are plain JSON/Markdown and safe to delete. `codemem index` rebuilds e
 | C++ code inside an indented `namespace x {` is missing | Only unindented namespace bodies (LLVM/Google style) are read |
 | A function shows no callers you expected | Calls are matched by name: a method called through an instance (`obj.train()`) is not tracked, and a default import is matched by the name used when importing it |
 | Import with an alias (`@/components/...`) shows as a package | The alias must be in `compilerOptions.paths` (or `baseUrl`) of a `tsconfig*.json` or `jsconfig.json` in a folder above the importing file. A config that only `extends` another one gets nothing from it: put `paths` in the file that's read |
+| A monorepo package imported by name (`shared/flags`, `@acme/core`) shows as a package | It's linked when some `package.json` in the repo (outside test/fixture folders) has that `name`. `name/path` is looked up inside that package's folder; the bare name uses `main`, `module` or `exports["."]` (an entry in `dist/` is tried as `src/`), else `index`. Pattern `exports` (`"./*"`) and bundler/Jest aliases (`resolve.alias`, `moduleNameMapper`) aren't read |
 | Python file imports show as packages | Absolute imports are looked up from the importing file's folder up to the project root, then `src/`. Other source roots aren't searched |
 | Graph page is blank | It needs internet to load Cytoscape from cdnjs/jsDelivr |
 | Graph is slow | Expected above roughly 2000 files |
