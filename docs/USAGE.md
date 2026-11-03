@@ -113,7 +113,7 @@ codemem index path/to/project
 Indexed 173 files (12 re-parsed) into /path/to/project/.codemem
 ```
 
-Scans all supported source files, records each file's imports, the names it imports, its functions/classes/methods, and what each function calls. A file is only read again when its modification time or size changed, and only re-parsed when its content changed. It also regenerates `.codemem/map.md`. Build output and vendored dependencies (`vendor/`, `third_party/`, `thirdparty/`, `3rdparty/`) are skipped.
+Scans all supported source files, records each file's imports, the names it imports, its functions/classes/methods, and what each function calls. A file is only read again when its modification time or size changed, and only re-parsed when its content changed. It also regenerates `.codemem/map.md`, even when no file changed (so a newer codemem's map layout shows up). Build output and vendored dependencies (`vendor/`, `third_party/`, `thirdparty/`, `3rdparty/`) are skipped.
 
 First run on big repos (one-time; afterwards a no-change run takes 0.1–6 s):
 
@@ -154,6 +154,7 @@ codemem map
 
 - **Entry points**: files listed in `package.json` (`main`, `bin`, `exports`); TS/JS, Python and Rust files nothing imports (tests and `__init__.py` excluded); and files that run on their own: a Python `if __name__ == "__main__":` block, a top-level `main` function, a Java `main` / C# `Main` method. Go, Java, C/C++ and C# files count only with a main, since a `.cpp` is compiled rather than included and a Go/Java/C# file belongs to its package. An unexpected TS/JS/Python entry point is often dead code. On a big repo only the first 60 are listed.
 - **Most depended-on**: changing these affects the most files.
+- **API** (when the repo serves HTTP routes): each file serving routes, how many, and the files calling them (`← src/pages/OrdersPage.jsx, ...`), most-called first, at most 30. See [API links](#api-links-which-frontend-code-calls-which-backend-route).
 - **Modules**: every file with what it imports (`pkg:` = external package) and what it defines.
 
 The same text is saved in `.codemem/map.md`, so agents and people can read it without running anything.
@@ -285,6 +286,22 @@ git diff --name-only main | codemem affected --stdin --quiet
 
 Follows the files that import the changed ones, then the files that import those, up to `--depth` hops (default 5). A test file ends the walk: it's listed under tests, and what imports a test isn't followed. Since a test adds nothing further, a test importing a file at the limit is listed too: in React the tests reach `ReactFiberWorkLoop.js` in 6 hops, through `react-noop-renderer` and `react-reconciler`. In a monorepo, packages imported by name are followed through their `package.json` (see the Troubleshooting row on aliases). `--quiet` prints only the test files, one per line, to hand to a test runner (for example in CI: `npx vitest run $(git diff --name-only HEAD | codemem affected --stdin --quiet)`). Paths are relative to the project root, as `git diff --name-only` prints them; anything that isn't an indexed source file is reported as not indexed.
 
+### API links: which frontend code calls which backend route
+
+Frontend and backend don't import each other; they talk over HTTP. When indexing, codemem reads:
+
+- **Routes** a file serves: Express `app.get/post/...("/path", ...)` and `router.get(...)` on what `express()` / `Router()` / `require("express").Router()` / `fastify()` made, `router.route("/path")`, and Flask/FastAPI `@app.route("/path", methods=[...])` / `@app.get(...)`, with a `Blueprint(url_prefix=)` / `APIRouter(prefix=)` declared in the same file.
+- **Where routers are mounted**: `app.use("/api/orders", orderRoutes)` (also with middleware before the router, or `require("./routes/x")` in place), followed through several files.
+- **Requests** a file makes: `fetch("/api/...")` (method from `method: "POST"` in its options, else GET), `axios.get/post/...` and instances from `axios.create({ baseURL })`, and Python `requests` / `httpx`. String constants from the same file are filled in (`` `${API_BASE}/${id}` ``); a base that stays unknown (`${process.env.ML_URL}`) matches by the path after it.
+
+Each request is matched to the route with the same method and path, comparing segment by segment: a path parameter (`:id`, `<int:id>`, `{id}`, `${id}`) matches any value; a fixed word in the request picks the route with that word (`/orders/stats` rather than `/orders/:id`), and a value picks the route's parameter. The result:
+
+- `context` shows `calls API: GET /api/orders/:id → server/routes/orderRoutes.js` on the calling file, and `serves API: 4 routes, called from ...` on the route file.
+- `affected` follows them: changing a route file lists the pages calling it, and their tests.
+- The graph draws them as dashed edges, and the side panel lists "Calls API" and "API called by".
+
+Not followed: URLs built at runtime beyond same-file constants, Next.js file-based API routes (`pages/api/...`), other frameworks (Django, Spring, Rails, Go's net/http), and GraphQL.
+
 ### Notes written in the code
 
 Comments tagged `WHY:`, `NOTE:`, `HACK:`, `IMPORTANT:`, `RATIONALE:` or `DECISION:` (uppercase, in `//`, `#`, or `/* */` comments) are picked up when files are indexed, together with the comment lines right below them that continue the text:
@@ -359,6 +376,7 @@ In the graph:
 | Faded dot with a dashed border | A test file (fixtures included) |
 | Orange ring | Entry point |
 | Arrow | "imports". When a file is selected, what it imports turns blue and what imports it turns green, each labelled with the names taken |
+| Dashed pink arrow | "calls API": the file makes HTTP requests to routes served by the other one, labelled with the routes (see [API links](#api-links-which-frontend-code-calls-which-backend-route)) |
 | "⚠ out of date" in the header | Notes whose files or folders no longer exist. They are listed in the side panel when the page opens (amber border), since a deleted file has no dot to click |
 
 File names appear once you zoom in far enough to read them.

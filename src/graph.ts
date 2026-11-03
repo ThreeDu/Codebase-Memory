@@ -27,6 +27,7 @@ export function writeGraph(root: string): string {
       imports: e.imports,
       external: e.external,
       importedBy: importers.get(path) ?? [],
+      api: (e.api ?? []).map(({ file, route }) => ({ file, route })),
       entry: entries.has(path),
       uses: e.uses,
       symbols: e.symbols.map(({ calls, ...s }) => ({ ...s, calls: resolvedCalls(index, path, calls) })),
@@ -47,7 +48,7 @@ const PAGE = `<!doctype html>
 <title>Codebase Graph</title>
 <style>
   /* dark only */
-  :root { color-scheme:dark; --bg:#0c0a09; --panel:#1c1917; --text:#e7e5e4; --muted:#a8a29e; --line:#292524; --edge:#57534e; --accent:#60a5fa; --in:#4ade80; --entry:#fbbf24; }
+  :root { color-scheme:dark; --bg:#0c0a09; --panel:#1c1917; --text:#e7e5e4; --muted:#a8a29e; --line:#292524; --edge:#57534e; --accent:#60a5fa; --in:#4ade80; --api:#fb7185; --entry:#fbbf24; }
   * { box-sizing: border-box; }
   body { margin:0; height:100vh; display:grid; grid-template-rows:auto 1fr; grid-template-columns:1fr 340px; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, sans-serif; }
   header { grid-column:1/-1; display:flex; gap:8px 16px; align-items:center; padding:10px 16px; border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
@@ -139,6 +140,17 @@ for (const f of DATA.files) {
     edges++;
   }
 }
+// HTTP calls (a page calling an Express route, a service calling a Flask one): one dashed edge per caller/route file
+let apiEdges = 0;
+for (const f of DATA.files) {
+  const routesTo = new Map();
+  for (const a of f.api) routesTo.set(a.file, [...new Set([...(routesTo.get(a.file) || []), a.route])]);
+  for (const [t, routes] of routesTo) {
+    els.push({ data: { id: f.path + "=>" + t, source: f.path, target: t, api: true,
+      label: routes.slice(0, 2).join(", ") + (routes.length > 2 ? " +" + (routes.length - 2) : "") } });
+    apiEdges++;
+  }
+}
 
 // legend: only the languages this repo has, most files first
 const langs = {};
@@ -147,9 +159,11 @@ document.getElementById("legend").innerHTML =
   Object.entries(langs).sort((a, b) => b[1] - a[1]).map(([l, n]) => '<span><i style="background:' + LANG_COLOR[l] + '"></i>' + esc(l) + " " + n + "</span>").join("") +
   '<span><i class="ring"></i>entry point</span><span><i class="test"></i>test</span>' +
   '<span><i class="line" style="border-color:var(--accent)"></i>imports</span><span><i class="line" style="border-color:var(--in)"></i>imported by</span>' +
+  (apiEdges ? '<span><i class="line" style="border-color:var(--api);border-top-style:dashed"></i>calls API</span>' : "") +
   "<span>bigger dot = imported by more files</span>";
 const staleNotes = DATA.notes.filter((n) => n.stale);
-document.getElementById("stats").textContent = DATA.files.length + " files · " + edges + " imports · " + DATA.notes.length + " notes" +
+document.getElementById("stats").textContent = DATA.files.length + " files · " + edges + " imports · " +
+  (apiEdges ? apiEdges + " API links · " : "") + DATA.notes.length + " notes" +
   (staleNotes.length ? " · " + staleNotes.length + " ⚠ out of date" : "");
 
 const cy = cytoscape({
@@ -168,6 +182,7 @@ const cy = cytoscape({
       "border-width": 1, "border-color": css("--line"), shape: "round-rectangle", padding: 14 } },
     { selector: "edge", style: { width: 1, "line-color": css("--edge"), "target-arrow-color": css("--edge"), "target-arrow-shape": "triangle",
       "arrow-scale": 0.7, "curve-style": "bezier", opacity: 0.5 } },
+    { selector: "edge[?api]", style: { "line-style": "dashed", "line-color": css("--api"), "target-arrow-color": css("--api"), opacity: 0.7 } },
     { selector: ".faded", style: { opacity: 0.08 } },
     { selector: ".hidden", style: { display: "none" } },
     // a selected file's edges: what it imports in blue, what imports it in green, each labelled with the names taken;
@@ -259,6 +274,9 @@ function focus(id, move = false) {
       symbolsHtml(f) +
       list("Imports", f.imports, (p) => named(p, f.uses[p])) +
       list("Imported by", f.importedBy, (p) => named(p, DATA.files.find((x) => x.path === p).uses[id])) +
+      list("Calls API", [...new Set(f.api.map((a) => a.file))], (p) => named(p, [...new Set(f.api.filter((a) => a.file === p).map((a) => a.route))])) +
+      list("API called by", DATA.files.filter((x) => x.api.some((a) => a.file === id)).map((x) => x.path),
+        (p) => named(p, [...new Set(byPath.get(p).api.filter((a) => a.file === id).map((a) => a.route))])) +
       list("Packages", f.external, (p) => "<li>" + esc(p) + "</li>");
   } else {
     const d = n.data("dir");

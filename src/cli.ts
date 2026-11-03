@@ -40,6 +40,8 @@ const root = resolve(flags.root ?? (cmd === "index" ? rest[0] : undefined) ?? ".
 try {
   if (cmd === "index") {
     const { index, parsed } = update(root);
+    // update() skips writing when no file changed; an explicit index still refreshes map.md (a newer codemem may lay it out differently)
+    writeMap(root, index);
     console.log(`Indexed ${Object.keys(index.files).length} files (${parsed} re-parsed) into ${root}/.codemem`);
   } else if (cmd === "map") {
     console.log(renderMap(root));

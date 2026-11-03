@@ -372,7 +372,7 @@ test("affected: dependents through several hops, and the tests among them", () =
   });
   assert.deepEqual(affected(dir, ["src/lib/greet.ts"], 1).files, [["src/lib/index.ts", 1]]); // depth limit
   assert.deepEqual(affected(dir, ["./src/main.test.ts", "README.md"]), { tests: ["src/main.test.ts"], files: [], unknown: ["README.md"] });
-  assert.match(formatAffected(dir, ["src/orphan.ts"]), /No test depends on these files within 5 import hops/);
+  assert.match(formatAffected(dir, ["src/orphan.ts"]), /No test depends on these files within 5 hops/);
 });
 
 test("monorepo: workspace packages imported by name, tests just past the hop limit", () => {
@@ -400,6 +400,63 @@ test("monorepo: workspace packages imported by name, tests just past the hop lim
   assert.deepEqual(affected(dir, ["packages/core/src/index.ts"]).tests, ["packages/app/test/app.test.ts"]);
   // the test is 2 hops away: with a 1-hop limit it's still found, being a leaf right past the limit
   assert.deepEqual(affected(dir, ["packages/core/src/index.ts"], 1), { tests: ["packages/app/test/app.test.ts"], files: [["packages/app/src/app.ts", 1]], unknown: [] });
+});
+
+test("API links: requests matched to the routes serving them, across frontend, Express and Flask", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codemem-"));
+  const put = (f: string, src: string) => {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), src);
+  };
+  put("server/index.js", [
+    `const express = require("express");`,
+    `const orderRoutes = require("./routes/orderRoutes");`,
+    `const app = express();`,
+    `app.use("/api/orders", auth, orderRoutes);`, // middleware before the router
+    `app.use("/api/admin", require("./routes/admin"));`,
+  ].join("\n"));
+  put("server/routes/orderRoutes.js", [
+    `const router = require("express").Router();`,
+    `router.get("/", list);`,
+    `router.get("/stats", stats);`,
+    `router.get("/:id", byId);`,
+    `router.put("/:id/status", setStatus);`,
+    `module.exports = router;`,
+  ].join("\n"));
+  put("server/routes/admin.js", `const r = require("express").Router();\nr.delete("/users/:id", del);\nmodule.exports = r;\n`);
+  put("server/ml.js", `const axios = require("axios");\nexports.score = (u) => axios.post(\`\${process.env.ML_URL}/api/predict\`, u);\n`);
+  put("ml/app.py", `from flask import Flask\napp = Flask(__name__)\n\n@app.route("/api/predict", methods=["POST"])\ndef predict():\n    return {}\n`);
+  put("src/orders.js", [
+    `import axios from "axios";`,
+    `const API_BASE = "/api/orders";`,
+    `const api = { get: () => 0 };`, // a non-axios `api.get` isn't a request
+    `export const one = (orderId) => fetch(\`\${API_BASE}/\${orderId}\`);`,
+    `export const stats = () => fetch("/api/orders/stats?days=7");`,
+    `export const setStatus = (id, s) => axios.put(\`/api/orders/\${id}/status\`, s);`,
+    `export const remove = (id) => fetch(\`/api/admin/users/\${id}\`, { method: "DELETE" });`,
+    `export const nowhere = () => fetch("/api/missing");`,
+    `export const Field = () => <input`,
+    `  id="isActive" />;`, // a JSX attribute, not a constant named id
+  ].join("\n"));
+  const { index } = update(dir);
+  const links = (f: string) => (index.files[f].api ?? []).map((a) => `${a.line} ${a.route} ${a.file}`);
+  assert.deepEqual(links("src/orders.js"), [
+    "4 GET /api/orders/:id server/routes/orderRoutes.js", // a value picks the parameter, not /stats
+    "5 GET /api/orders/stats server/routes/orderRoutes.js", // a fixed word picks the exact route
+    "6 PUT /api/orders/:id/status server/routes/orderRoutes.js",
+    "7 DELETE /api/admin/users/:id server/routes/admin.js", // mounted through require(), method from the options
+  ]);
+  // unknown base URL (an env variable): matched by the path after it, Express -> Flask
+  assert.deepEqual(links("server/ml.js"), ["2 POST /api/predict ml/app.py"]);
+  // what calls a route file counts for affected, and context shows both directions
+  assert.deepEqual(affected(dir, ["ml/app.py"]).files.map(([f]) => f), ["server/ml.js"]);
+  assert.match(context(dir, "server/routes/orderRoutes.js"), /serves API: 4 routes, called from src\/orders.js \(GET \/api\/orders\/:id\)/);
+  assert.match(context(dir, "src/orders.js"), /calls API: GET \/api\/orders\/:id → server\/routes\/orderRoutes.js/);
+  // map.md: route files, most-called first, with who calls them
+  const map = renderMap(dir, index);
+  assert.match(map, /## API\n\n_6 routes in 3 files; 5 requests in the code matched to them/);
+  assert.match(map, /- `ml\/app.py` \(1 routes\) ← server\/ml.js/);
+  assert.match(map, /- `server\/routes\/orderRoutes.js` \(4 routes\) ← src\/orders.js/);
 });
 
 test("read_symbol shows who uses it and whether a test does", () => {

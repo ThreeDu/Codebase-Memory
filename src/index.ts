@@ -5,10 +5,10 @@ import { join, posix } from "node:path";
 import ts from "typescript";
 import { writeAtomic } from "./files.js";
 import { loadNotes, staleMark } from "./notes.js";
-import { parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, whyComments, type Parsed } from "./parse.js";
+import { httpParts, parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, whyComments, type Parsed } from "./parse.js";
 
 export const STORE = ".codemem";
-const VERSION = 9; // bump when parse output changes, so cached entries get re-parsed
+const VERSION = 10; // bump when parse output changes, so cached entries get re-parsed
 // Measured on 9 big repos: files over 1 MB include core code (LLVM's X86ISelLowering.cpp, 2.6 MB; Kubernetes'
 // generated.pb.go, 1.6 MB, imported by 2.5k files), while those over 5 MB were test data, constant tables and fixtures
 export const MAX_READ_BYTES = 5 * 1024 * 1024;
@@ -23,7 +23,15 @@ const TEST =
 
 // specs/names/symbols are parse output, cached by mtime+size (then hash); imports/external/uses are re-resolved
 // whenever anything changed, so new or deleted target files are picked up
+export interface ApiLink {
+  line: number; // of the request in the calling file
+  method: string;
+  path: string; // as requested
+  file: string; // the file serving it
+  route: string; // "GET /api/orders/:id", with its mount prefix
+}
 export interface FileEntry extends Parsed {
+  api?: ApiLink[]; // this file's HTTP requests matched to the routes serving them
   hash: string;
   mtime: number;
   size: number;
@@ -257,7 +265,62 @@ function parse(lang: Lang, f: string, src: string): Parsed {
     : lang === "cs" ? parseCSharp(src)
     : parseTs(f, src);
   const whys = whyComments(src);
-  return whys.length ? { ...p, whys } : p;
+  const http = lang === "ts" || lang === "py" ? httpParts(src, lang === "py") : {};
+  return {
+    ...p,
+    ...(whys.length && { whys }),
+    ...(http.routes?.length && { routes: http.routes }),
+    ...(http.mounts?.length && { mounts: http.mounts }),
+    ...(http.calls?.length && { calls: http.calls }),
+  };
+}
+
+/** "/api/orders/:id" -> ["api", "orders", "*"]: a path parameter of any style (:id, <int:id>, {id}, ${id}) matches anything. */
+const segments = (p: string) =>
+  p.split(/[?#]/)[0].split("/").filter(Boolean).map((s) => (/^:|^<.*>$|\{.*\}|^\*$/.test(s) ? "*" : s));
+
+/** Each file's HTTP requests matched to the routes that serve them, the links imports can't show (a React page calling
+ * an Express route, an Express handler calling a Flask service). Recomputed on every resolve: cheap, and a route edited in
+ * one file changes the links of callers in any other. */
+function linkApis(index: Index, ctx: Ctx): void {
+  // where each router file is mounted: Express app.use("/api/orders", orderRoutes), possibly through several files
+  const mountedAt = new Map<string, { from: string; prefix: string }[]>();
+  for (const [f, e] of Object.entries(index.files))
+    for (const m of e.mounts ?? []) {
+      const target = m.name ? Object.entries(e.uses).find(([, names]) => names.includes(m.name!))?.[0] : resolveSpec(langOf(f), f, m.spec!, ctx)[0];
+      if (target) mountedAt.set(target, [...(mountedAt.get(target) ?? []), { from: f, prefix: m.prefix }]);
+    }
+  const prefixes = (f: string, seen: Set<string> = new Set()): string[] => {
+    const up = (mountedAt.get(f) ?? []).filter((m) => !seen.has(m.from));
+    return up.length ? up.flatMap((m) => prefixes(m.from, new Set([...seen, f])).map((p) => p + m.prefix)) : [""];
+  };
+  const table = Object.entries(index.files).flatMap(([f, e]) =>
+    (e.routes ?? []).flatMap((r) => prefixes(f).map((p) => ({ file: f, method: r.method, route: p + r.path, segs: segments(p + r.path) }))),
+  );
+  if (!table.length) return;
+  for (const [f, e] of Object.entries(index.files)) {
+    const links: ApiLink[] = [];
+    for (const c of e.calls ?? []) {
+      // "*/predict": the base URL is unknown (an env variable), so it matches the end of a route
+      const tail = c.path.startsWith("*/");
+      const segs = segments(tail ? c.path.slice(1) : c.path);
+      const fits = (r: (typeof table)[number]) => {
+        if (r.file === f || !(c.method === "*" || r.method === "*" || c.method === r.method)) return false;
+        const off = tail ? r.segs.length - segs.length : 0;
+        if (tail ? segs.length < 2 || off < 0 : segs.length !== r.segs.length) return false;
+        return segs.every((s, i) => s === "*" || r.segs[off + i] === "*" || s === r.segs[off + i]);
+      };
+      // the closest route wins, segment by segment: a fixed word picks the route with that word (/orders/stats over
+      // /orders/:id), a value picks the route's parameter (`/orders/${orderId}` -> /orders/:id, not /orders/stats)
+      const score = (r: (typeof table)[number]) => {
+        const off = tail ? r.segs.length - segs.length : 0;
+        return segs.reduce((n, s, i) => n + (s === "*" ? (r.segs[off + i] === "*" ? 2 : 0) : r.segs[off + i] === s ? 2 : 1), 0);
+      };
+      const hit = table.filter(fits).sort((a, b) => score(b) - score(a))[0];
+      if (hit) links.push({ line: c.line, method: c.method, path: c.path, file: hit.file, route: `${hit.method} ${hit.route}` });
+    }
+    if (links.length) e.api = links;
+  }
 }
 
 function resolveSpec(lang: Lang, f: string, s: string, ctx: Ctx): string[] {
@@ -390,8 +453,8 @@ export function update(root: string): { index: Index; parsed: number } {
         edited.push(f);
       }
     }
-    const { specs, names, symbols, main, namespaces, refs, whys, oversize } = p;
-    const parsedPart = { specs, names, symbols, main, namespaces, refs, whys, oversize };
+    const { specs, names, symbols, main, namespaces, refs, whys, oversize, routes, mounts, calls } = p;
+    const parsedPart = { specs, names, symbols, main, namespaces, refs, whys, oversize, routes, mounts, calls };
     index.files[f] = { hash, mtime: st.mtimeMs, size: st.size, ...parsedPart, imports: [], external: [], uses: {} };
   }
 
@@ -488,6 +551,7 @@ export function update(root: string): { index: Index; parsed: number } {
     }
     e.imports = [...imports].sort();
   }
+  linkApis(index, ctx);
   // a few files re-saved unchanged: re-hashing them next time is cheaper than rewriting a 100MB+ index now
   const touched = files.filter((f) => !untouched(f)).length;
   if (redo?.size === 0 && touched <= 200) return { index, parsed: 0 };
@@ -561,6 +625,7 @@ export function entryPoints(root: string, index: Index): string[] {
 
 const MAP_BUDGET = 40_000; // chars (~10k tokens): the map is read whole by agents, so a big repo gets a coarser one
 const ENTRY_LIMIT = 60;
+const API_LIMIT = 30;
 
 /** Modules section, one line per file, or per folder (first `depth` path parts) with the folders it depends on. */
 function modulesSection(index: Index, files: string[], depth?: number): string[] {
@@ -627,6 +692,22 @@ export function renderMap(root: string, index = loadIndex(root)): string {
     lines.push("", "## Notes");
     for (const n of notes)
       lines.push(`- #${n.id} [${n.kind}] ${n.title}${n.paths.length ? ` (${n.paths.join(", ")})` : ""}${staleMark(root, n)}`);
+  }
+  // which files serve HTTP routes and who calls them: the frontend <-> backend wiring imports don't show
+  const callers = new Map<string, Set<string>>();
+  for (const [f, e] of Object.entries(index.files)) for (const a of e.api ?? []) callers.set(a.file, (callers.get(a.file) ?? new Set()).add(f));
+  const servers = files.filter((f) => index.files[f].routes?.length);
+  if (servers.length) {
+    const routes = servers.reduce((n, f) => n + index.files[f].routes!.length, 0);
+    const linked = files.reduce((n, f) => n + (index.files[f].api?.length ?? 0), 0);
+    lines.push("", "## API", "", `_${routes} routes in ${servers.length} files; ${linked} requests in the code matched to them. ← = files calling them._`);
+    const ranked = servers.sort((a, b) => (callers.get(b)?.size ?? 0) - (callers.get(a)?.size ?? 0) || (a < b ? -1 : 1));
+    for (const f of ranked.slice(0, API_LIMIT)) {
+      const by = [...(callers.get(f) ?? [])].sort();
+      const shown = by.slice(0, 5).join(", ") + (by.length > 5 ? `, +${by.length - 5} more` : "");
+      lines.push(`- \`${f}\` (${index.files[f].routes!.length} routes)${by.length ? ` ← ${shown}` : ""}`);
+    }
+    if (ranked.length > API_LIMIT) lines.push(`- …and ${ranked.length - API_LIMIT} more route files`);
   }
   lines.push("", "## Modules");
   const head = lines.join("\n");

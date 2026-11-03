@@ -17,12 +17,95 @@ export interface Parsed {
   namespaces?: string[]; // C#: namespaces this file declares
   refs?: string[]; // C#: every name the file mentions, including top-level statements outside any class
   whys?: Why[]; // `// WHY: ...`-style comments: the reasons written next to the code
+  routes?: Endpoint[]; // HTTP routes this file serves (Express, Flask, FastAPI), paths as written in the file
+  mounts?: { prefix: string; name?: string; spec?: string }[]; // Express app.use("/api/x", router | require("./x"))
+  calls?: Endpoint[]; // HTTP requests it makes (fetch, axios, requests, httpx); path may start with "*/" (unknown base URL)
   oversize?: boolean; // over the size limit: known (imports to it resolve) but never read
 }
 export interface Why {
   line: number;
   tag: string;
   text: string;
+}
+export interface Endpoint {
+  method: string; // GET, POST, ... or "*" when unknown
+  path: string;
+  line: number;
+}
+
+const lineAt = (src: string, i: number) => src.slice(0, i).split("\n").length;
+const VERB = "get|post|put|patch|delete";
+
+/** Same-file string constants (`const API_BASE = "/api/orders"`, Python `BASE = "http://ml:5000"`), to fill
+ * `${API_BASE}/x`. JS needs const/let/var: a JSX attribute on its own line (`id="isActive"`) once passed for `const id`. */
+function constants(src: string, py: boolean): Map<string, string> {
+  const out = new Map<string, string>();
+  const decl = py ? /^([A-Za-z_]\w*)\s*(?::\s*\w+\s*)?=\s*(['"])([^'"\n]*)\2/gm
+    : /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*(?::\s*\w+\s*)?=\s*(['"`])([^'"`$\n]*)\2/gm;
+  for (const [, name, , value] of src.matchAll(decl)) out.set(name, value);
+  return out;
+}
+
+/** A URL as written ("/api/x/${id}", f"{BASE}/predict") with known constants filled in; a base that stays unknown
+ * (`${process.env.API}`) becomes "*" so it can still be matched by the path after it. */
+function fillUrl(raw: string, consts: Map<string, string>): string | undefined {
+  let url = raw.replace(/\$?\{\s*([A-Za-z_]\w*)\s*\}/g, (m, name) => consts.get(name) ?? m);
+  url = url.replace(/^https?:\/\/[^/]*/, ""); // the host doesn't matter, the path does
+  if (/^\$?\{[^}]*\}/.test(url)) url = "*" + url.replace(/^\$?\{[^}]*\}/, "");
+  return url.startsWith("/") || url.startsWith("*/") ? url : undefined;
+}
+
+/** HTTP routes a JS/TS or Python file serves, where it mounts routers, and the requests it makes. Regex-based, for the
+ * common shapes. shortcut: routers mounted through several files and URLs built at runtime aren't followed. */
+export function httpParts(src: string, py: boolean): Pick<Parsed, "routes" | "mounts" | "calls"> {
+  const routes: Endpoint[] = [];
+  const mounts: { prefix: string; name?: string; spec?: string }[] = [];
+  const calls: Endpoint[] = [];
+  const consts = constants(src, py);
+  const call = (method: string, raw: string, at: number) => {
+    const path = fillUrl(raw, consts);
+    if (path) calls.push({ method, path, line: lineAt(src, at) });
+  };
+  if (py) {
+    // Flask blueprint / FastAPI router prefix declared in this file applies to its routes
+    const prefix = src.match(/(?:Blueprint\([^)]*url_prefix|APIRouter\([^)]*prefix)\s*=\s*['"]([^'"]+)['"]/)?.[1] ?? "";
+    for (const m of src.matchAll(new RegExp(`^\\s*@\\w+\\.(route|${VERB}|api_route)\\(\\s*['"]([^'"]+)['"]([^)]*)\\)`, "gm"))) {
+      const listed = m[3].match(/methods\s*=\s*\[\s*['"](\w+)['"]/)?.[1];
+      const method = m[1] === "route" || m[1] === "api_route" ? (listed?.toUpperCase() ?? "GET") : m[1].toUpperCase();
+      routes.push({ method, path: prefix + m[2], line: lineAt(src, m.index!) });
+    }
+    for (const m of src.matchAll(new RegExp(`\\b(?:requests|httpx|session|client)\\.(${VERB})\\(\\s*f?(['"])([^'"]+)\\2`, "g")))
+      call(m[1].toUpperCase(), m[3], m.index!);
+    return { routes, mounts, calls };
+  }
+  // routers: app/router, or what express() / Router() / fastify() created in this file (not an axios `api` client)
+  const servers = new Set(["app", "router"]);
+  const made = /(?:const|let|var)\s+(\w+)\s*=\s*(?:new\s+)?(?:express\s*\(\s*\)|(?:express\.|require\(\s*['"]express['"]\s*\)\.)?Router\s*\(|fastify\s*\()/g;
+  for (const [, name] of src.matchAll(made))
+    servers.add(name);
+  const srv = [...servers].join("|");
+  for (const m of src.matchAll(new RegExp(`\\b(?:${srv})\\.(${VERB}|all)\\(\\s*(['"\`])(\\/[^'"\`]*)\\2`, "g")))
+    routes.push({ method: m[1] === "all" ? "*" : m[1].toUpperCase(), path: m[3], line: lineAt(src, m.index!) });
+  for (const m of src.matchAll(new RegExp(`\\b(?:${srv})\\.route\\(\\s*(['"\`])(\\/[^'"\`]*)\\1\\s*\\)((?:\\s*\\.(?:${VERB})\\()?)`, "g")))
+    routes.push({ method: "*", path: m[2], line: lineAt(src, m.index!) });
+  for (const m of src.matchAll(new RegExp(`\\b(?:${srv})\\.use\\(\\s*(['"\`])(\\/[^'"\`]*)\\1\\s*,\\s*require\\(\\s*['"]([^'"]+)['"]\\s*\\)`, "g")))
+    mounts.push({ prefix: m[2], spec: m[3] });
+  // app.use("/api/x", auth, xRoutes): the router is the last argument
+  for (const m of src.matchAll(new RegExp(`\\b(?:${srv})\\.use\\(\\s*(['"\`])(\\/[^'"\`]*)\\1\\s*,\\s*((?:[\\w.]+\\s*,\\s*)*)(\\w+)\\s*\\)`, "g")))
+    mounts.push({ prefix: m[2], name: m[4] });
+  // clients: fetch, axios, and instances made with axios.create({ baseURL })
+  const clients = new Map([["axios", ""]]);
+  for (const m of src.matchAll(/(?:const|let|var)\s+(\w+)\s*=\s*axios\.create\(\s*\{([^}]*)\}/g))
+    clients.set(m[1], m[2].match(/baseURL\s*:\s*(['"`])([^'"`]*)\1/)?.[2] ?? "");
+  for (const m of src.matchAll(/\bfetch\(\s*(['"`])([^'"`]+)\1/g)) {
+    // the method, if the options right after this call say so ("method: 'POST'"), else GET
+    const after = src.slice(m.index! + m[0].length, m.index! + m[0].length + 300).split(/\bfetch\(/)[0];
+    call(after.match(/method\s*:\s*['"`](\w+)['"`]/)?.[1].toUpperCase() ?? "GET", m[2], m.index!);
+  }
+  for (const m of src.matchAll(new RegExp(`\\b(${[...clients.keys()].join("|")})\\.(${VERB})\\(\\s*(['"\`])([^'"\`]+)\\3`, "g")))
+    call(m[2].toUpperCase(), clients.get(m[1]) + m[4], m.index!);
+  calls.sort((a, b) => a.line - b.line); // in file order, whichever client made them
+  return { routes, mounts, calls };
 }
 
 const WHY_TAG = /^\s*(\/\/+|#+|\/\*+|\*+)\s*(WHY|NOTE|HACK|IMPORTANT|RATIONALE|DECISION)\s*:\s*(.*)$/;

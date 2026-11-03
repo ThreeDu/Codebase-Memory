@@ -89,7 +89,10 @@ export function readSymbol(root: string, name: string): string {
  * them. A test ends the walk: whatever imports a test isn't affected by the change through it. */
 export function affected(root: string, changed: string[], depth = 5) {
   const index = fresh(root);
+  // dependents: files importing it, and files calling an HTTP route it serves (a page calling an Express route)
   const importers = importersOf(index);
+  for (const [g, ge] of Object.entries(index.files))
+    for (const t of new Set((ge.api ?? []).map((a) => a.file))) importers.set(t, [...(importers.get(t) ?? []), g]);
   const tests = new Set<string>();
   const hops = new Map<string, number>(); // dependent -> fewest import hops from a changed file
   const unknown: string[] = [];
@@ -128,7 +131,7 @@ export function formatAffected(root: string, changed: string[], depth = 5): stri
   const cap = <T>(xs: T[], show: (x: T) => string) =>
     [...xs.slice(0, 100).map(show), ...(xs.length > 100 ? [`- …and ${xs.length - 100} more`] : [])];
   const out = [`# Affected by: ${changed.join(", ")}`, ""];
-  out.push(`## Tests to run (${tests.length})`, ...(tests.length ? cap(tests, (t) => `- \`${t}\``) : [`No test depends on these files within ${depth} import hops.`]), "");
+  out.push(`## Tests to run (${tests.length})`, ...(tests.length ? cap(tests, (t) => `- \`${t}\``) : [`No test depends on these files within ${depth} hops (imports and API calls).`]), "");
   out.push(`## Files that depend on them (${files.length})`, ...cap(files, ([f, d]) => `- \`${f}\` (${d} hop${d > 1 ? "s" : ""})`));
   if (unknown.length) out.push("", `Not indexed (not a source file codemem reads, or not a path from the project root): ${unknown.join(", ")}`);
   return out.join("\n");
@@ -228,6 +231,9 @@ export function context(root: string, target: string, budget = 8000): string {
   );
 
   const importers = importersOf(index);
+  const apiCallers = new Map<string, string[]>(); // route file -> "caller (GET /api/x)"
+  for (const [g, ge] of Object.entries(index.files))
+    for (const a of ge.api ?? []) apiCallers.set(a.file, [...(apiCallers.get(a.file) ?? []), `${g} (${a.route})`]);
   const out = [`# Context: ${target}`, ""];
   if (notes.length) {
     out.push("## Notes");
@@ -243,6 +249,11 @@ export function context(root: string, target: string, budget = 8000): string {
     if (e.external.length) out.push(`  - packages: ${e.external.join(", ")}`);
     const by = importers.get(f);
     if (by?.length) out.push(`  - imported by: ${by.map((g) => withNames(g, index.files[g].uses[f])).join(", ")}`);
+    if (e.api?.length) out.push(`  - calls API: ${[...new Set(e.api.map((a) => `${a.route} → ${a.file}`))].join(", ")}`);
+    if (e.routes?.length) {
+      const callers = [...new Set(apiCallers.get(f) ?? [])];
+      out.push(`  - serves API: ${e.routes.length} route${e.routes.length > 1 ? "s" : ""}${callers.length ? `, called from ${callers.join(", ")}` : ""}`);
+    }
     if (e.symbols.length) out.push("  - defines:");
     for (const s of e.symbols) {
       const calls = resolvedCalls(index, f, s.calls).map((c) => (c.file === f ? c.name : `${c.name} (${c.file})`));
