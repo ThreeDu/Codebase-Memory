@@ -8,7 +8,7 @@ import { loadNotes, staleMark } from "./notes.js";
 import { httpParts, parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, whyComments, type Parsed } from "./parse.js";
 
 export const STORE = ".codemem";
-const VERSION = 10; // bump when parse output changes, so cached entries get re-parsed
+const VERSION = 11; // bump when parse output changes, so cached entries get re-parsed
 // Measured on 9 big repos: files over 1 MB include core code (LLVM's X86ISelLowering.cpp, 2.6 MB; Kubernetes'
 // generated.pb.go, 1.6 MB, imported by 2.5k files), while those over 5 MB were test data, constant tables and fixtures
 export const MAX_READ_BYTES = 5 * 1024 * 1024;
@@ -272,12 +272,15 @@ function parse(lang: Lang, f: string, src: string): Parsed {
     ...(http.routes?.length && { routes: http.routes }),
     ...(http.mounts?.length && { mounts: http.mounts }),
     ...(http.calls?.length && { calls: http.calls }),
+    ...(http.clients?.length && { clients: http.clients }),
+    ...(http.via?.length && { via: http.via }),
   };
 }
 
 /** "/api/orders/:id" -> ["api", "orders", "*"]: a path parameter of any style (:id, <int:id>, {id}, ${id}) matches anything. */
+// `orders${buildQueryString(q)}`: a value glued to a word is a query string or suffix, not a path parameter
 const segments = (p: string) =>
-  p.split(/[?#]/)[0].split("/").filter(Boolean).map((s) => (/^:|^<.*>$|\{.*\}|^\*$/.test(s) ? "*" : s));
+  p.replace(/([^/])\$\{[^}]*\}/g, "$1").split(/[?#]/)[0].split("/").filter(Boolean).map((s) => (/^:|^<.*>$|\{.*\}|^\*$/.test(s) ? "*" : s));
 
 /** Each file's HTTP requests matched to the routes that serve them, the links imports can't show (a React page calling
  * an Express route, an Express handler calling a Flask service). Recomputed on every resolve: cheap, and a route edited in
@@ -300,7 +303,15 @@ function linkApis(index: Index, ctx: Ctx): void {
   if (!table.length) return;
   for (const [f, e] of Object.entries(index.files)) {
     const links: ApiLink[] = [];
-    for (const c of e.calls ?? []) {
+    // calls to a client function (here or imported) are requests too: `apiClient("/api/x", { method: "POST" })`
+    const viaClient = (e.via ?? []).flatMap((c) => {
+      const home = Object.entries(e.uses).find(([, names]) => names.includes(c.fn))?.[0] ?? f;
+      const client = index.files[home]?.clients?.find((w) => w.name === c.fn);
+      if (!client) return [];
+      const path = client.base && !c.path.startsWith("*") ? client.base + c.path : c.path;
+      return [{ method: c.method || client.method || "GET", path, line: c.line }];
+    });
+    for (const c of [...(e.calls ?? []), ...viaClient]) {
       // "*/predict": the base URL is unknown (an env variable), so it matches the end of a route
       const tail = c.path.startsWith("*/");
       const segs = segments(tail ? c.path.slice(1) : c.path);
@@ -453,8 +464,8 @@ export function update(root: string): { index: Index; parsed: number } {
         edited.push(f);
       }
     }
-    const { specs, names, symbols, main, namespaces, refs, whys, oversize, routes, mounts, calls } = p;
-    const parsedPart = { specs, names, symbols, main, namespaces, refs, whys, oversize, routes, mounts, calls };
+    const { specs, names, symbols, main, namespaces, refs, whys, oversize, routes, mounts, calls, clients, via } = p;
+    const parsedPart = { specs, names, symbols, main, namespaces, refs, whys, oversize, routes, mounts, calls, clients, via };
     index.files[f] = { hash, mtime: st.mtimeMs, size: st.size, ...parsedPart, imports: [], external: [], uses: {} };
   }
 

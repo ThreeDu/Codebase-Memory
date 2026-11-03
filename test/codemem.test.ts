@@ -459,6 +459,53 @@ test("API links: requests matched to the routes serving them, across frontend, E
   assert.match(map, /- `server\/routes\/orderRoutes.js` \(4 routes\) ← src\/orders.js/);
 });
 
+test("API links through client functions that wrap fetch", () => {
+  const dir = mkdtempSync(join(tmpdir(), "codemem-"));
+  const put = (f: string, src: string) => {
+    mkdirSync(join(dir, dirname(f)), { recursive: true });
+    writeFileSync(join(dir, f), src);
+  };
+  put("server/index.js", [
+    `const express = require("express");`,
+    `const app = express();`,
+    `app.get("/api/products", list);`,
+    `app.post("/api/products", create);`,
+    `app.get("/api/products/:id", byId);`,
+    `app.get("/api/products/stats", stats);`,
+    `app.post("/api/chat/stream", chat);`,
+  ].join("\n"));
+  put("ml/app.py", `from flask import Flask\napp = Flask(__name__)\n\n@app.route("/api/score", methods=["POST"])\ndef score():\n    return {}\n`);
+  put("src/apiClient.js", `export async function apiClient(url, options = {}) {\n  const res = await fetch(url, { method: options.method });\n  return res.json();\n}\n`);
+  put("src/stream.js", `export function postStream(url, body) {\n  return fetch(url, { method: "POST", body });\n}\n`);
+  put("server/mlClient.js", [
+    `const ML = () => process.env.ML_URL;`,
+    `async function requestMl(path, { method = "GET" } = {}) {`,
+    `  return fetch(\`\${ML()}\${path}\`, { method });`,
+    `}`,
+    `module.exports = { requestMl };`,
+  ].join("\n"));
+  put("server/score.js", `const { requestMl: ml } = require("./mlClient");\nexports.score = () => ml("/api/score", { method: "POST" });\n`);
+  put("src/products.js", [
+    `import { apiClient as api } from "./apiClient";`,
+    `import { postStream } from "./stream";`,
+    `const BASE = "/api/products";`,
+    `export const list = (q) => api(\`\${BASE}\${toQuery(q)}\`);`, // query string glued on: still /api/products
+    `export const create = (p) => api(BASE, { method: "POST", body: p });`,
+    `export const one = (id) => api(\`\${BASE}/\${id}\`);`,
+    `export const chat = (m) => postStream("/api/chat/stream", m);`,
+    `export const go = () => navigate("/api/products");`, // not a client: no request
+  ].join("\n"));
+  const { index } = update(dir);
+  const links = (f: string) => (index.files[f].api ?? []).map((a) => `${a.line} ${a.route}`);
+  assert.deepEqual(links("src/products.js"), [
+    "4 GET /api/products",
+    "5 POST /api/products",
+    "6 GET /api/products/:id",
+    "7 POST /api/chat/stream", // the client fixes the method
+  ]);
+  assert.deepEqual(links("server/score.js"), ["2 POST /api/score"]); // aliased require, unknown base URL
+});
+
 test("read_symbol shows who uses it and whether a test does", () => {
   const dir = copyFixture("sample");
   const greet = readSymbol(dir, "greet");

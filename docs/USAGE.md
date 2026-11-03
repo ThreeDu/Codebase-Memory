@@ -293,6 +293,7 @@ Frontend and backend don't import each other; they talk over HTTP. When indexing
 - **Routes** a file serves: Express `app.get/post/...("/path", ...)` and `router.get(...)` on what `express()` / `Router()` / `require("express").Router()` / `fastify()` made, `router.route("/path")`, and Flask/FastAPI `@app.route("/path", methods=[...])` / `@app.get(...)`, with a `Blueprint(url_prefix=)` / `APIRouter(prefix=)` declared in the same file.
 - **Where routers are mounted**: `app.use("/api/orders", orderRoutes)` (also with middleware before the router, or `require("./routes/x")` in place), followed through several files.
 - **Requests** a file makes: `fetch("/api/...")` (method from `method: "POST"` in its options, else GET), `axios.get/post/...` and instances from `axios.create({ baseURL })`, and Python `requests` / `httpx`. String constants from the same file are filled in (`` `${API_BASE}/${id}` ``); a base that stays unknown (`${process.env.ML_URL}`) matches by the path after it.
+- **Client functions** that wrap those: a function whose first parameter is the URL it fetches (`function apiClient(url, opts) { ... fetch(url, ...) }`, `` fetch(`${BASE}${path}`) ``). Every call to it, in its file or wherever it's imported (`as` / `{ a: b }` aliases included), is a request: `apiClient("/api/products", { method: "POST" })`, or `apiClient(PRODUCTS_URL)` with a same-file constant. The method comes from the call's options, else from the client (`fetch(url, { method: "POST" })`), else GET.
 
 Each request is matched to the route with the same method and path, comparing segment by segment: a path parameter (`:id`, `<int:id>`, `{id}`, `${id}`) matches any value; a fixed word in the request picks the route with that word (`/orders/stats` rather than `/orders/:id`), and a value picks the route's parameter. The result:
 
@@ -300,7 +301,7 @@ Each request is matched to the route with the same method and path, comparing se
 - `affected` follows them: changing a route file lists the pages calling it, and their tests.
 - The graph draws them as dashed edges, and the side panel lists "Calls API" and "API called by".
 
-Not followed: URLs built at runtime beyond same-file constants, Next.js file-based API routes (`pages/api/...`), other frameworks (Django, Spring, Rails, Go's net/http), and GraphQL.
+Not followed: URLs built at runtime beyond same-file constants, a client wrapping another client, clients that take the method as a separate argument, Next.js file-based API routes (`pages/api/...`), other frameworks (Django, Spring, Rails, Go's net/http), and GraphQL.
 
 ### Notes written in the code
 

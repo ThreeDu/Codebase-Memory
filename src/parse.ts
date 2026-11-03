@@ -20,6 +20,8 @@ export interface Parsed {
   routes?: Endpoint[]; // HTTP routes this file serves (Express, Flask, FastAPI), paths as written in the file
   mounts?: { prefix: string; name?: string; spec?: string }[]; // Express app.use("/api/x", router | require("./x"))
   calls?: Endpoint[]; // HTTP requests it makes (fetch, axios, requests, httpx); path may start with "*/" (unknown base URL)
+  clients?: Client[]; // its functions that pass their first parameter to fetch/axios as the URL (`apiClient(url, opts)`)
+  via?: (Endpoint & { fn: string })[]; // calls to a function with a URL as first argument; requests if `fn` is a client
   oversize?: boolean; // over the size limit: known (imports to it resolve) but never read
 }
 export interface Why {
@@ -32,6 +34,11 @@ export interface Endpoint {
   path: string;
   line: number;
 }
+export interface Client {
+  name: string;
+  method?: string; // fixed by the client (`fetch(url, { method: "POST" })`), else from the caller's options or GET
+  base: string; // URL part the client puts before the path: "" or "*" (unknown, `${process.env.API}${path}`)
+}
 
 const lineAt = (src: string, i: number) => src.slice(0, i).split("\n").length;
 const VERB = "get|post|put|patch|delete";
@@ -41,8 +48,12 @@ const VERB = "get|post|put|patch|delete";
 function constants(src: string, py: boolean): Map<string, string> {
   const out = new Map<string, string>();
   const decl = py ? /^([A-Za-z_]\w*)\s*(?::\s*\w+\s*)?=\s*(['"])([^'"\n]*)\2/gm
-    : /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*(?::\s*\w+\s*)?=\s*(['"`])([^'"`$\n]*)\2/gm;
-  for (const [, name, , value] of src.matchAll(decl)) out.set(name, value);
+    : /^\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_]\w*)\s*(?::\s*\w+\s*)?=\s*(['"`])([^'"`\n]*)\2/gm;
+  // a constant built from earlier ones (`${BASE}/retention`) is kept once they fill it
+  for (const [, name, , raw] of src.matchAll(decl)) {
+    const value = py ? raw : raw.replace(/\$\{\s*([A-Za-z_]\w*)\s*\}/g, (m, n) => out.get(n) ?? m);
+    if (!value.includes("${")) out.set(name, value);
+  }
   return out;
 }
 
@@ -57,7 +68,7 @@ function fillUrl(raw: string, consts: Map<string, string>): string | undefined {
 
 /** HTTP routes a JS/TS or Python file serves, where it mounts routers, and the requests it makes. Regex-based, for the
  * common shapes. shortcut: routers mounted through several files and URLs built at runtime aren't followed. */
-export function httpParts(src: string, py: boolean): Pick<Parsed, "routes" | "mounts" | "calls"> {
+export function httpParts(src: string, py: boolean): Pick<Parsed, "routes" | "mounts" | "calls" | "clients" | "via"> {
   const routes: Endpoint[] = [];
   const mounts: { prefix: string; name?: string; spec?: string }[] = [];
   const calls: Endpoint[] = [];
@@ -105,7 +116,38 @@ export function httpParts(src: string, py: boolean): Pick<Parsed, "routes" | "mo
   for (const m of src.matchAll(new RegExp(`\\b(${[...clients.keys()].join("|")})\\.(${VERB})\\(\\s*(['"\`])([^'"\`]+)\\3`, "g")))
     call(m[2].toUpperCase(), clients.get(m[1]) + m[4], m.index!);
   calls.sort((a, b) => a.line - b.line); // in file order, whichever client made them
-  return { routes, mounts, calls };
+
+  // wrapper clients: a function whose first parameter is the URL it fetches (`fetch(url, ...)`, `fetch(`${BASE}${path}`)`).
+  // shortcut: the nearest function head before the fetch counts as its owner, and a wrapper of a wrapper isn't followed
+  const heads = [...src.matchAll(/\bfunction\s+(\w+)\s*\(\s*(\w*)|\b(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?(?:function\s*\w*\s*)?(?:\(\s*(\w*)|(\w+)\s*=>)/g)]
+    .map((m) => ({ at: m.index!, name: m[1] ?? m[3], param: m[2] ?? m[4] ?? m[5] }));
+  const wrappers: Client[] = [];
+  const sends = new RegExp(`\\b(?:fetch|(?:${[...clients.keys()].join("|")})\\.(${VERB}))\\(\\s*(?:(\\w+)\\s*[,)]|\`([^\`]*)\\$\\{\\s*(\\w+)\\s*\\}\`)`, "g");
+  for (const m of src.matchAll(sends)) {
+    const param = m[2] ?? m[4];
+    const owner = heads.filter((h) => h.at < m.index!).pop();
+    if (!owner?.param || owner.param !== param || wrappers.some((w) => w.name === owner.name)) continue;
+    const opts = src.slice(m.index! + m[0].length, m.index! + m[0].length + 300);
+    const method = m[1]?.toUpperCase() ?? opts.match(/^[^)]*?method\s*:\s*['"`](\w+)['"`]/)?.[1].toUpperCase();
+    wrappers.push({ name: owner.name, ...(method && { method }), base: m[3] ? (fillUrl(m[3] + "/", consts) ?? "*/").slice(0, -1) : "" });
+  }
+  // calls with a URL first argument to functions defined here or imported (by their exported name, past `as`/`:` aliases)
+  const fns = new Map(wrappers.map((w) => [w.name, w.name]));
+  for (const [, imported, required] of src.matchAll(/\bimport\s*\{([^}]*)\}\s*from|\b(?:const|let|var)\s*\{([^}]*)\}\s*=\s*require\(/g))
+    for (const [, exported, local] of (imported ?? required).matchAll(/(\w+)(?:\s*(?:as|:)\s*(\w+))?/g)) fns.set(local ?? exported, exported);
+  const via: (Endpoint & { fn: string })[] = [];
+  // the URL as a literal or a same-file constant (`apiClient(REWARDS_BASE, ...)`)
+  for (const m of src.matchAll(/(?<![.\w])(\w+)\(\s*(?:(['"`])([^'"`]+)\2|([A-Za-z_]\w*)\s*[,)])/g)) {
+    const fn = fns.get(m[1]);
+    const raw = m[3] ?? consts.get(m[4]);
+    const path = fn && raw !== undefined && fillUrl(raw, consts);
+    if (!fn || !path) continue;
+    // the method the options right after say, up to the next call of the same function
+    const after = src.slice(m.index! + m[0].length, m.index! + m[0].length + 300).split(new RegExp(`\\b${m[1]}\\(`))[0];
+    const method = after.match(/method\s*:\s*['"`](\w+)['"`]/)?.[1].toUpperCase() ?? "";
+    via.push({ fn, method, path, line: lineAt(src, m.index!) });
+  }
+  return { routes, mounts, calls, clients: wrappers, via };
 }
 
 const WHY_TAG = /^\s*(\/\/+|#+|\/\*+|\*+)\s*(WHY|NOTE|HACK|IMPORTANT|RATIONALE|DECISION)\s*:\s*(.*)$/;
