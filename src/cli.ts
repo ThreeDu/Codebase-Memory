@@ -1,11 +1,10 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { readFileSync, watch } from "node:fs";
-import { resolve } from "node:path";
-import { affected, context, findSymbol, formatAffected, readSymbol, searchSymbols } from "./context.js";
+import { existsSync, readFileSync, watch } from "node:fs";
+import { join, resolve } from "node:path";
+import { affected, context, fileBrief, findSymbol, formatAffected, notesBrief, readSymbol, searchSymbols, sessionBrief } from "./context.js";
 import { writeGraph } from "./graph.js";
-import { isSource, renderMap, update, writeMap } from "./index.js";
-import { serve } from "./mcp.js";
+import { indexIsCurrent, isSource, renderMap, STORE, update, writeMap } from "./index.js";
 import { addNote, KINDS, loadNotes, removeNote, staleMark, updateNote } from "./notes.js";
 
 const USAGE = `codemem <command> [--root <dir>]
@@ -24,7 +23,17 @@ const USAGE = `codemem <command> [--root <dir>]
   note list                            ⚠ marks notes whose paths no longer exist
   graph [--no-open]                    write .codemem/graph.html and open it
   watch                                keep map.md and graph.html updated as code changes
-  mcp                                  run the MCP server on stdio`;
+  mcp                                  run the MCP server on stdio
+  hooks                                print Claude Code hook settings that run the two commands below
+  hook session-start | hook read       hook commands: read the event JSON on stdin, print context for the agent`;
+
+// Claude Code settings (.claude/settings.json): a brief at session start (and after /clear or /compact), file notes on Read
+const HOOKS = {
+  hooks: {
+    SessionStart: [{ matcher: "startup|clear|compact", hooks: [{ type: "command", command: "codemem hook session-start" }] }],
+    PreToolUse: [{ matcher: "Read", hooks: [{ type: "command", command: "codemem hook read" }] }],
+  },
+};
 
 // split "--name value" flags from positional args; a flag followed by another flag (--no-open --root x) has no value
 const flags: Record<string, string> = {};
@@ -99,7 +108,27 @@ try {
       timer = setTimeout(run, 300);
     });
     console.log(`Watching ${root} (Ctrl+C to stop)`);
+  } else if (cmd === "hook" && (rest[0] === "session-start" || rest[0] === "read")) {
+    // a hook never gets in the agent's way: on any failure it adds nothing and exits 0
+    try {
+      const input = JSON.parse(readFileSync(0, "utf8") || "{}");
+      const dir = resolve(flags.root ?? input.cwd ?? ".");
+      const read = rest[0] === "read";
+      // index at session start only in a repo (or one indexed before), never in a home folder or anywhere else
+      const repo = existsSync(join(dir, ".git")) || existsSync(join(dir, STORE));
+      let text = read ? fileBrief(dir, input.tool_input?.file_path ?? "") : "";
+      if (!read && repo && indexIsCurrent(dir)) text = sessionBrief(dir);
+      else if (!read && repo) {
+        // a first index can take minutes, past the hook's timeout, which would kill it every session: build it in the background
+        spawn(process.execPath, [process.argv[1], "index", dir], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+        text = notesBrief(dir);
+      }
+      if (text) console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: read ? "PreToolUse" : "SessionStart", additionalContext: text } }));
+    } catch {}
+  } else if (cmd === "hooks") {
+    console.log(JSON.stringify(HOOKS, null, 2));
   } else if (cmd === "mcp") {
+    const { serve } = await import("./mcp.js"); // the MCP SDK takes ~1 s to load; only the server needs it
     await serve(root);
   } else {
     console.error(USAGE);

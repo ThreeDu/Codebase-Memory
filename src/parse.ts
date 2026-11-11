@@ -1,4 +1,5 @@
-import ts from "typescript";
+import { createRequire } from "node:module";
+import type TS from "typescript";
 
 export interface Sym {
   name: string;
@@ -39,6 +40,10 @@ export interface Client {
   method?: string; // fixed by the client (`fetch(url, { method: "POST" })`), else from the caller's options or GET
   base: string; // URL part the client puts before the path: "" or "*" (unknown, `${process.env.API}${path}`)
 }
+
+// loaded on first use: it takes ~1 s, which the hooks (run on every Read) and repos without TS/JS shouldn't pay
+let ts: typeof TS;
+export const typescript = (): typeof TS => (ts ??= createRequire(import.meta.url)("typescript"));
 
 const lineAt = (src: string, i: number) => src.slice(0, i).split("\n").length;
 const VERB = "get|post|put|patch|delete";
@@ -198,6 +203,7 @@ const pushUnique = (m: Record<string, string[]>, k: string, v: string) => {
 };
 
 export function parseTs(file: string, src: string): Parsed {
+  typescript();
   // preProcessFile also catches require() and dynamic import(); the AST walk below adds the imported names
   const specs = [...new Set(ts.preProcessFile(src, true, true).importedFiles.map((i) => i.fileName))];
   const sf = ts.createSourceFile(file, src, ts.ScriptTarget.Latest, true);
@@ -205,15 +211,15 @@ export function parseTs(file: string, src: string): Parsed {
   const alias = new Map<string, string>(); // local name -> name exported by the source module
   const namespaces = new Set<string>(); // `import * as x`: x.foo uses foo
   const symbols: Sym[] = [];
-  const bodies: [Sym, ts.Node][] = [];
-  const line = (n: ts.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
-  const at = (n: ts.Node) => ({ line: line(n), end: sf.getLineAndCharacterOfPosition(n.getEnd()).line + 1 });
-  const exported = (n: ts.Node) =>
+  const bodies: [Sym, TS.Node][] = [];
+  const line = (n: TS.Node) => sf.getLineAndCharacterOfPosition(n.getStart(sf)).line + 1;
+  const at = (n: TS.Node) => ({ line: line(n), end: sf.getLineAndCharacterOfPosition(n.getEnd()).line + 1 });
+  const exported = (n: TS.Node) =>
     ts.canHaveModifiers(n) && !!ts.getModifiers(n)?.some((m) => m.kind === ts.SyntaxKind.ExportKeyword);
-  const isFn = (n?: ts.Node) => !!n && (ts.isArrowFunction(n) || ts.isFunctionExpression(n));
-  const requireOf = (n?: ts.Node) =>
+  const isFn = (n?: TS.Node) => !!n && (ts.isArrowFunction(n) || ts.isFunctionExpression(n));
+  const requireOf = (n?: TS.Node) =>
     n && ts.isCallExpression(n) && ts.isIdentifier(n.expression) && n.expression.text === "require" && ts.isStringLiteral(n.arguments[0] ?? n)
-      ? (n.arguments[0] as ts.StringLiteral).text
+      ? (n.arguments[0] as TS.StringLiteral).text
       : undefined;
 
   // CommonJS exports: `module.exports = { a, b }` / `module.exports = X` mark existing names exported;
@@ -221,7 +227,7 @@ export function parseTs(file: string, src: string): Parsed {
   const cjsExported = new Set<string>();
   // `module.exports = mongoose.model(...)` / `export default connect(X)` has no name of its own; name it after the file,
   // which is how importers usually name it (`const Product = require("./models/Product")`)
-  const anonymousDefault = (st: ts.Node, value: ts.Expression) => {
+  const anonymousDefault = (st: TS.Node, value: TS.Expression) => {
     if (ts.isIdentifier(value)) return cjsExported.add(value.text);
     const s: Sym = {
       name: file.split("/").pop()!.replace(/\.[^.]+$/, ""),
@@ -328,7 +334,7 @@ export function parseTs(file: string, src: string): Parsed {
   const local = new Set(symbols.filter((s) => !s.parent).map((s) => s.name));
   for (const [s, node] of bodies) {
     const calls = new Set<string>();
-    const visit = (n: ts.Node): void => {
+    const visit = (n: TS.Node): void => {
       if (ts.isPropertyAccessExpression(n)) {
         // x.foo: only "foo" of a namespace import counts; a property name is never an imported binding.
         // A same-file name can't be what x.foo means (jwt.verify inside our own verify)

@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
-import { definedIn, importersOf, isTest, resolvedCalls, update, type FileEntry, type Index } from "./index.js";
+import { existsSync, readFileSync, statSync } from "node:fs";
+import { isAbsolute, join, relative, resolve } from "node:path";
+import { approxTokens, definedIn, entryPoints, FILE_BRIEF_MIN_BYTES, importersOf, isTest, list, resolvedCalls, STORE, update, type FileEntry, type Index } from "./index.js";
 import { loadNotes, normalizePath, staleMark } from "./notes.js";
 import type { Sym } from "./parse.js";
 
@@ -270,6 +270,63 @@ export function context(root: string, target: string, budget = 8000): string {
   }
   if (!matched.length && !symbols.length) out.push("_No files matched._");
 
+  let text = out.join("\n");
+  if (text.length > budget) text = `${text.slice(0, budget)}\n…(truncated ${text.length - budget} chars; narrow the target)`;
+  return text.replace(`# Context: ${target}`, `# Context: ${target} (${approxTokens(text)})`);
+}
+
+/** The session brief while the first index is still being built: the notes need no index. */
+export function notesBrief(root: string): string {
+  const notes = loadNotes(root);
+  return [
+    "# codemem: indexing this repo in the background (first run); get_map and the other tools work once it's done",
+    ...(notes.length ? ["", "## Notes left by earlier sessions"] : []),
+    ...notes.map((n) => `- #${n.id} [${n.kind}] ${n.title}${n.paths.length ? ` (${n.paths.join(", ")})` : ""}${staleMark(root, n)}`),
+  ].join("\n");
+}
+
+/** What a new agent session starts with (SessionStart hook): every note, where the code starts and what it leans on,
+ * and which tools to ask next. Short on purpose: the full map is one get_map away. */
+export function sessionBrief(root: string): string {
+  const index = fresh(root);
+  const files = Object.keys(index.files);
+  if (!files.length) return "";
+  const notes = loadNotes(root);
+  const importers = [...importersOf(index)].sort((a, b) => b[1].length - a[1].length);
+  const entries = entryPoints(root, index);
+  const routes = files.reduce((n, f) => n + (index.files[f].routes?.length ?? 0), 0);
+  const linked = files.reduce((n, f) => n + (index.files[f].api?.length ?? 0), 0);
+  const out = [`# codemem: ${files.length} source files indexed (full map: get_map, or .codemem/map.md)`, ""];
+  if (notes.length) {
+    out.push("## Notes left by earlier sessions (get_context <path> shows their full text)");
+    for (const n of notes) out.push(`- #${n.id} [${n.kind}] ${n.title}${n.paths.length ? ` (${n.paths.join(", ")})` : ""}${staleMark(root, n)}`);
+    out.push("");
+  }
+  if (entries.length) out.push(`Entry points: ${list(entries, 10)}`);
+  if (importers.length) out.push(`Most depended-on: ${importers.slice(0, 8).map(([f, by]) => `${f} (${by.length})`).join(", ")}`);
+  if (routes) out.push(`API: ${routes} routes, ${linked} requests in the code linked to them`);
+  out.push(
+    "",
+    "Before editing a file, get_context <file> (notes, importers, symbols); find code by rough name with search_symbols; " +
+      "see what a change breaks with affected; save decisions and gotchas with add_note.",
+  );
   const text = out.join("\n");
-  return text.length <= budget ? text : `${text.slice(0, budget)}\n…(truncated ${text.length - budget} chars; narrow the target)`;
+  return text.length <= SESSION_BUDGET ? text : `${text.slice(0, SESSION_BUDGET)}\n…(cut; get_map has the rest)`;
+}
+const SESSION_BUDGET = 8000;
+
+/** What the Read hook adds when an agent opens `file`: the notes about it and the links reading it can't show (who imports
+ * it, which API routes it calls or serves), from links.json without re-indexing: a Read must not wait on it.
+ * shortcut: links may be one edit behind; notes are always current. */
+export function fileBrief(root: string, file: string): string {
+  const rel = normalizePath(relative(root, resolve(root, file)));
+  if (!rel || rel.startsWith("../") || isAbsolute(rel)) return "";
+  if (!existsSync(join(root, rel)) || statSync(join(root, rel)).size < FILE_BRIEF_MIN_BYTES) return ""; // reading a small file costs about what this adds
+  let links: string[] = [];
+  try {
+    links = JSON.parse(readFileSync(join(root, STORE, "links.json"), "utf8"))[rel] ?? [];
+  } catch {} // not indexed yet: notes only
+  const notes = loadNotes(root).filter((n) => n.paths.some((p) => within(rel, p)));
+  const out = [...notes.map((n) => `- note #${n.id} [${n.kind}] ${n.title}${staleMark(root, n)}${n.body ? `: ${n.body}` : ""}`), ...links];
+  return out.length ? [`codemem on ${rel}:`, ...out].join("\n") : "";
 }

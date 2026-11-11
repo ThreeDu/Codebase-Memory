@@ -46,6 +46,35 @@ test("CLI: notes add, list, edit, rm", () => {
   assert.equal(ok("note", "list", "--root", root), "");
 });
 
+test("CLI: Claude Code hooks add context at session start and on Read, and never fail", () => {
+  const root = sample();
+  const hook = (event: string, input: string) => spawnSync(process.execPath, [CLI, "hook", event], { input, encoding: "utf8" });
+  const added = (r: ReturnType<typeof hook>) => JSON.parse(r.stdout).hookSpecificOutput.additionalContext as string;
+  // not a git repo and never indexed: session start writes nothing there
+  const before = hook("session-start", JSON.stringify({ cwd: root }));
+  assert.equal(before.stdout, "");
+  assert.equal(existsSync(join(root, ".codemem")), false);
+  ok("note", "add", "--kind", "convention", "--paths", "src/lib/greet.ts", "Greetings stay pure", "No I/O in here", "--root", root);
+  // no index yet: a first index can outlast the hook's timeout, so it runs in the background and the notes come now
+  const first = added(hook("session-start", JSON.stringify({ cwd: root })));
+  assert.match(first, /^# codemem: indexing this repo in the background[\s\S]*- #1 \[convention\] Greetings stay pure/);
+  ok("index", root);
+  const start = hook("session-start", JSON.stringify({ cwd: root, hook_event_name: "SessionStart" }));
+  assert.equal(JSON.parse(start.stdout).hookSpecificOutput.hookEventName, "SessionStart");
+  assert.match(added(start), /# codemem: 5 source files indexed[\s\S]*- #1 \[convention\] Greetings stay pure \(src\/lib\/greet.ts\)[\s\S]*Entry points: src\/main.ts/);
+  // Read: a small file adds nothing (reading it costs about the same); a bigger one gets its notes and importers
+  const read = (f: string) => hook("read", JSON.stringify({ cwd: root, tool_name: "Read", tool_input: { file_path: join(root, f) } }));
+  assert.equal(read("src/lib/greet.ts").stdout, "");
+  writeFileSync(join(root, "src/lib/greet.ts"), readFileSync(join(root, "src/lib/greet.ts"), "utf8") + `// ${"x".repeat(1600)}\n`);
+  ok("index", root); // links.json is written at index time
+  assert.equal(added(read("src/lib/greet.ts")), "codemem on src/lib/greet.ts:\n- note #1 [convention] Greetings stay pure: No I/O in here\n- imported by 1 file: src/lib/index.ts");
+  assert.equal(read("../elsewhere.ts").stdout, ""); // outside the repo
+  const bad = hook("read", "not json");
+  assert.equal(bad.status, 0);
+  assert.equal(bad.stdout + bad.stderr, "");
+  assert.deepEqual(Object.keys(JSON.parse(ok("hooks")).hooks), ["SessionStart", "PreToolUse"]);
+});
+
 test("CLI: errors exit 1 with a message on stderr", () => {
   const root = sample();
   const fails = (pattern: RegExp, ...args: string[]) => {

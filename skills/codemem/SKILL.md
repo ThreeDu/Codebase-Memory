@@ -16,7 +16,7 @@ codemem keeps a map of this repo (files, imports, entry points, functions/classe
 
 ## Workflow
 
-1. **New to the repo**: `get_map` once. It lists entry points, the most depended-on modules, all notes, and the modules with their imports. On a big repo the modules are grouped by folder; ask `get_context` for a folder to see its files. Don't call `get_map` again in the same task.
+1. **New to the repo**: if the session started with a `# codemem:` brief (a hook), you already have the notes and the repo's shape; skip `get_map` unless you need the module list. Text starting `codemem on <file>:` after a Read is that file's notes and links: follow them. Otherwise `get_map` once. It lists entry points, the most depended-on modules, all notes, and the modules with their imports. On a big repo the modules are grouped by folder; ask `get_context` for a folder to see its files. Don't call `get_map` again in the same task.
 2. **Before working on an area**: `get_context` with a file or folder path (`src/auth`), or an exact function/class name. Read the notes it returns first, both the manual ones and the `WHY:` / `NOTE:` / `HACK:` comments listed under each file: they are decisions and past fixes you must respect. A keyword there only matches file paths and note text; to find code for a concept, use `search_symbols`.
 3. **Find code**:
    - Exact name known: `find_symbol` (`name` or `Class.method`) for where it's defined and every caller.
@@ -30,7 +30,7 @@ codemem keeps a map of this repo (files, imports, entry points, functions/classe
    - `convention`: a rule the code follows ("Every admin route calls verifyAdminRequest first").
    - `fix`: a non-obvious bug's cause and fix ("MODEL_DIR must be absolute; relative path broke after deploy").
    First check the notes `get_context` showed: if one already covers it, `update_note` instead of adding a near-duplicate. Don't record what the code or git log already says, or a summary of your change.
-   A reason that belongs to one function is better as a comment right above it, `// WHY: ...` (or `NOTE:`, `HACK:`, `IMPORTANT:`, `RATIONALE:`, `DECISION:`, uppercase): codemem attaches it to that function. Never put secrets in it.
+   A reason that belongs to one function is better as a comment right above it, `// WHY: ...` (or `NOTE:`, `HACK:`, `IMPORTANT:`, `RATIONALE:`, `DECISION:`, uppercase): codemem attaches it to that function. Never put secrets in it. In a note, wrap anything sensitive you must mention in `<private>...</private>`: it is dropped before saving.
    After editing, `affected` on the files you changed tells you which tests to run.
 8. **Keep notes true**: a note marked `⚠ missing: <path>` points at a renamed or deleted file. Fix its `paths` with `update_note`, or `remove_note` if it no longer applies. Do the same for any note your change made wrong.
 

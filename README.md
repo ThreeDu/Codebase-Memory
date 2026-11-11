@@ -6,6 +6,7 @@ Long-term memory for a codebase, so AI coding agents pick up its architecture wi
 - **Symbols**: the functions, classes, and methods each file defines, which names it takes from which file, and which of those each function calls, so you can ask where `ChurnPredictor` is defined and which functions use it.
 - **Notes**: architecture decisions, code conventions, and bugs that were already fixed, each attached to the files or folders it's about. Comments tagged `WHY:`, `NOTE:`, `HACK:`, `IMPORTANT:`, `RATIONALE:` or `DECISION:` in the code count too, attached to the function they describe (credential-shaped strings in them are redacted).
 - **Incremental**: unchanged files aren't even read (same modification time and size), only changed content is re-parsed, and after an edit only the files around it are re-resolved. Tested on Kubernetes, LLVM, MongoDB, VS Code, Next.js, Godot, Django, React and Express.
+- **Hooks (Claude Code)**: optional. Each session starts with a short brief (every note, entry points, most depended-on files), again after `/clear` and `/compact`; opening a file with Read adds that file's notes, importers and API links. `codemem hooks` prints the settings.
 - **Selective context**: an agent asks about a file, folder, or keyword and gets back only the relevant notes, plus those files with their imports and importers.
 - **API links**: HTTP requests (`fetch`, `axios`, `requests`, `httpx`, and your own client functions wrapping them, like `apiClient(url, opts)`) are matched to the routes serving them (Express, Flask, FastAPI), so a frontend page is linked to the backend route it calls, and a backend to the service it calls. They show in `context`, `affected` and the graph (dashed edges). On a React + Express + Flask app: 91 of 91 requests linked.
 
@@ -65,6 +66,8 @@ On Windows use `-- cmd /c codemem mcp --root .`. Without installing anything: `-
 Tools: `reindex`, `get_map`, `get_context`, `find_symbol`, `search_symbols`, `read_symbol` (also shows who uses it and whether a test does), `affected`, `add_note`, `update_note`, `remove_note`. Several agents (or an agent and `codemem watch`) can use one repo at once: files are written atomically and notes under a lock. A good line for the target repo's `CLAUDE.md`/`AGENTS.md`:
 
 > Before working on an area, call `get_context` for it; find code by a rough name with `search_symbols`, and read a single function with `read_symbol` instead of the whole file. Record decisions, conventions, and non-obvious bug fixes with `add_note`; fix or remove notes marked `⚠ missing` or no longer true.
+
+To have every session start with the notes and the shape of the repo, without the agent having to ask, add the hooks: run `codemem hooks` and merge its output into `.claude/settings.json` (needs `codemem` on PATH; see [docs/USAGE.md](docs/USAGE.md#hooks-claude-code-context-without-asking)).
 
 Or give Claude Code the full usage guide as a skill. With the package installed globally: `cp -r "$(npm root -g)/@threedu/codebase-memory/skills/codemem" ~/.claude/skills/` (see [docs/USAGE.md](docs/USAGE.md#or-install-the-skill-claude-code)).
 

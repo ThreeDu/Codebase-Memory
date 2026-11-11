@@ -459,6 +459,17 @@ test("API links: requests matched to the routes serving them, across frontend, E
   assert.match(map, /- `server\/routes\/orderRoutes.js` \(4 routes\) ← src\/orders.js/);
 });
 
+test("notes drop <private> sections; map and context say what they cost in tokens", () => {
+  const dir = copyFixture("sample");
+  const note = addNote(dir, { kind: "fix", title: "Retry the login <private>user khang</private>", body: "Token: <PRIVATE>abc123</PRIVATE> rotates daily.\n<private>unclosed secret" });
+  assert.equal(note.title, "Retry the login");
+  assert.equal(note.body, "Token:  rotates daily.");
+  assert.doesNotMatch(readFileSync(join(dir, ".codemem/notes.json"), "utf8"), /khang|abc123|secret/);
+  assert.throws(() => addNote(dir, { kind: "fix", title: "<private>all of it</private>" }), /title is required/);
+  assert.match(renderMap(dir, update(dir).index), /^_5 source files, ~\d+ tokens\./m);
+  assert.match(context(dir, "src/lib"), /^# Context: src\/lib \(~\d+ tokens\)/);
+});
+
 test("API links through client functions that wrap fetch", () => {
   const dir = mkdtempSync(join(tmpdir(), "codemem-"));
   const put = (f: string, src: string) => {

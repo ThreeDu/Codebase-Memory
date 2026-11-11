@@ -171,7 +171,7 @@ codemem context payment --budget 4000
 ```
 
 ```markdown
-# Context: src/main.ts
+# Context: src/main.ts (~68 tokens)
 
 ## Files (1)
 - `src/main.ts`
@@ -336,6 +336,8 @@ Saved note #1.
 
 Notes attached to a folder appear in `context` for every file inside it.
 
+Anything between `<private>` and `</private>` (any case; an unclosed tag runs to the end) is dropped before the note is saved, so it never reaches `notes.json`: `codemem note add --kind fix "Login retry" "Test account <private>me@example.com / pw</private> gets locked after 3 tries"`.
+
 ### `note list`: show all notes
 
 ```bash
@@ -475,6 +477,32 @@ Add this to the project's `CLAUDE.md` or `AGENTS.md`:
 
 Agents that can't use MCP can read `.codemem/map.md` directly.
 
+### Hooks (Claude Code): context without asking
+
+The MCP tools answer when the agent asks. Hooks hand it context on their own (the idea comes from claude-mem; codemem's version runs no model and no background service):
+
+- **Session start** (also after `/clear` and `/compact`): a short brief, every note with its paths and `⚠ missing` marks, the entry points, the most depended-on files, the API count, and which tool to use for what. About 1-2k tokens. It re-indexes changed files first, so it's current: under a second on most repos, 6 s on VS Code, 20 s on LLVM. With no index yet (or one from an older codemem), the first index can take minutes on a huge repo, longer than the hook may run, so it starts in the background and the session gets the notes now and the full brief next time. It only runs in a git repo or a folder indexed before, never in your home folder.
+- **Read**: when the agent opens a file, the notes about it, who imports it, and the API routes it calls or serves. Files under 1.5 KB get nothing (reading them costs about the same). The links come from `.codemem/links.json`, written at index time and a few MB even on LLVM, so a Read waits 0.1–0.25 s; they can be one edit behind, notes are always current.
+
+A hook that fails adds nothing and never blocks the agent. Print the settings:
+
+```bash
+codemem hooks
+```
+
+```json
+{
+  "hooks": {
+    "SessionStart": [{ "matcher": "startup|clear|compact", "hooks": [{ "type": "command", "command": "codemem hook session-start" }] }],
+    "PreToolUse": [{ "matcher": "Read", "hooks": [{ "type": "command", "command": "codemem hook read" }] }]
+  }
+}
+```
+
+Merge the `hooks` object into `.claude/settings.json` in the project (for that project) or `~/.claude/settings.json` (for all). It needs `codemem` on PATH (`npm install -g @threedu/codebase-memory`); from a clone, use `node /path/to/Codebase-Memory/dist/src/cli.js hook session-start` and `... hook read` as the commands. To try a hook by hand: `echo '{"cwd":"."}' | codemem hook session-start`.
+
+`map.md` and `get_context` also start with what they cost, such as `~2.5k tokens`, estimated at 4 characters per token.
+
 ### Or install the skill (Claude Code)
 
 [`skills/codemem/SKILL.md`](../skills/codemem/SKILL.md) is a fuller version of the lines above: which tool when, checking what a change breaks, finding unused code, writing good notes without duplicates, and what to do when results are empty or look wrong. Claude Code loads it on its own when a task needs it. Copy the folder to one of:
@@ -503,6 +531,7 @@ Everything is inside `.codemem/` in the indexed project:
 | `index.json` | Files, hashes, imports, symbols, calls | Optional on small repos (others skip the first scan); no on big ones: it's 50–250MB on repos like Kubernetes or LLVM and rebuilds itself |
 | `notes.json` | Your notes | **Yes**: this is the knowledge you can't regenerate |
 | `map.md` | Generated overview | Yes, so agents without MCP can read it |
+| `links.json` | Per file, the importers and API links the Read hook adds | No: regenerated with the index |
 | `graph.html` | Generated graph page | Optional: it's large and regenerated on every `graph` run; add `.codemem/graph.html` to `.gitignore` if you prefer |
 | `*.tmp`, `notes.json.lock` | Exist for a moment while a file is written or a note saved | No; add `.codemem/*.tmp` and `.codemem/*.lock` to `.gitignore`. A `.lock` older than 10 seconds is from a process that crashed and is removed automatically |
 

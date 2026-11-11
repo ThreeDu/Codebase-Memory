@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync, type Stats } from "node:fs";
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync, type Stats } from "node:fs";
 import { join, posix } from "node:path";
-import ts from "typescript";
 import { writeAtomic } from "./files.js";
 import { loadNotes, staleMark } from "./notes.js";
-import { httpParts, parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, whyComments, type Parsed } from "./parse.js";
+import { httpParts, parseC, parseCSharp, parseGo, parseJava, parsePy, parseRust, parseTs, typescript, whyComments, type Parsed } from "./parse.js";
 
 export const STORE = ".codemem";
 const VERSION = 11; // bump when parse output changes, so cached entries get re-parsed
@@ -52,6 +51,20 @@ const storePath = (root: string, name: string) => join(root, STORE, name);
 export const isSource = (f: string) => CODE.test(f) && !f.split(/[\\/]/).some((part) => SKIP.has(part));
 /** The one notion of a test file, shared by entry points, search ranking and `affected`. */
 export const isTest = (f: string) => TEST.test(f);
+
+/** Whether an index built by this version exists, from the first bytes of index.json rather than all 100MB+ of it.
+ * Without one, the next update() is a full parse: minutes on LLVM-sized repos. */
+export function indexIsCurrent(root: string): boolean {
+  try {
+    const fd = openSync(storePath(root, "index.json"), "r");
+    const head = Buffer.alloc(32);
+    readSync(fd, head, 0, 32, 0);
+    closeSync(fd);
+    return head.toString().startsWith(`{"version":${VERSION},`);
+  } catch {
+    return false;
+  }
+}
 
 export function loadIndex(root: string): Index {
   const p = storePath(root, "index.json");
@@ -397,6 +410,7 @@ export function update(root: string): { index: Index; parsed: number } {
   // nothing changed: skip resolving and rewriting, which on a 30k-file repo costs more than the check
   if (same && old.fingerprint === fingerprint && files.length === Object.keys(old.files).length && files.every(untouched)) {
     if (!existsSync(storePath(root, "map.md"))) writeMap(root, old);
+    if (!existsSync(storePath(root, "links.json"))) writeLinks(old, root); // indexed by a version without it
     return { index: old, parsed: 0 };
   }
   const ctx: Ctx = { known: new Set(files), byDir: new Map(), byName: new Map(), goMods: [], crates: [], tsPaths: [], workspace: [] };
@@ -417,7 +431,7 @@ export function update(root: string): { index: Index; parsed: number } {
   }
   // shortcut: `extends` isn't followed; every tsconfig*.json is read on its own, which covers Vite's tsconfig.app.json
   for (const f of all.filter((f) => /^(tsconfig.*|jsconfig)\.json$/.test(posix.basename(f)) && existsSync(join(root, f)))) {
-    const opts = ts.parseConfigFileTextToJson(f, readFileSync(join(root, f), "utf8")).config?.compilerOptions; // allows comments
+    const opts = typescript().parseConfigFileTextToJson(f, readFileSync(join(root, f), "utf8")).config?.compilerOptions; // allows comments
     if (!opts?.baseUrl && !opts?.paths) continue;
     const dir = posix.dirname(f);
     const paths = Object.entries((opts.paths ?? {}) as Record<string, string[]>);
@@ -567,6 +581,7 @@ export function update(root: string): { index: Index; parsed: number } {
   const touched = files.filter((f) => !untouched(f)).length;
   if (redo?.size === 0 && touched <= 200) return { index, parsed: 0 };
   writeAtomic(storePath(root, "index.json"), JSON.stringify(index)); // compact: it's a cache, often 100MB+ on big repos
+  writeLinks(index, root);
   if (!redo || redo.size) writeMap(root, index); // files only re-saved unchanged: the map can't have changed
   return { index, parsed: edited.length };
 }
@@ -736,7 +751,38 @@ export function renderMap(root: string, index = loadIndex(root)): string {
       else hi = mid - 1;
     }
   }
-  return `${head}\n${body}\n`;
+  const map = `${head}\n${body}\n`;
+  return map.replace("source files.", `source files, ${approxTokens(map)}.`);
+}
+
+/** "~3.2k tokens": what reading this text costs an agent, at the usual ~4 characters per token. */
+export const approxTokens = (s: string) => {
+  const t = s.length / 4;
+  return `~${t < 1000 ? Math.ceil(t) : `${(t / 1000).toFixed(1)}k`} tokens`;
+};
+
+/** Below this a file's own text costs about what the Read hook would add, so it adds nothing (claude-mem's cut-off). */
+export const FILE_BRIEF_MIN_BYTES = 1500;
+export const list = (items: string[], max: number) => items.slice(0, max).join(", ") + (items.length > max ? `, +${items.length - max} more` : "");
+
+/** links.json: per file, the lines the Read hook adds (who imports it, the API routes it calls or serves). Apart from
+ * index.json so a hook run on every Read loads a few MB, not a 100MB+ index (LLVM: 6.8 s). */
+function writeLinks(index: Index, root: string): void {
+  const importers = importersOf(index);
+  const callers = new Map<string, Set<string>>();
+  for (const [g, ge] of Object.entries(index.files)) for (const a of ge.api ?? []) callers.set(a.file, (callers.get(a.file) ?? new Set()).add(g));
+  const out: Record<string, string[]> = {};
+  for (const [f, e] of Object.entries(index.files)) {
+    if (e.size < FILE_BRIEF_MIN_BYTES) continue;
+    const lines: string[] = [];
+    const by = importers.get(f) ?? [];
+    if (by.length) lines.push(`- imported by ${by.length} file${by.length > 1 ? "s" : ""}: ${list(by, 5)}`);
+    if (e.api?.length) lines.push(`- calls API: ${list([...new Set(e.api.map((a) => `${a.route} → ${a.file}`))], 5)}`);
+    const from = [...(callers.get(f) ?? [])];
+    if (e.routes?.length) lines.push(`- serves ${e.routes.length} API routes${from.length ? `, called from ${list(from, 5)}` : ""}`);
+    if (lines.length) out[f] = lines;
+  }
+  writeAtomic(storePath(root, "links.json"), JSON.stringify(out));
 }
 
 export function writeMap(root: string, index?: Index): void {

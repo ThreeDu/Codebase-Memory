@@ -34,14 +34,18 @@ const save = (root: string, notes: Note[]) => writeAtomic(notesPath(root), JSON.
 // read, change and save under one lock: two agents adding a note at once both keep theirs, with different ids
 const locked = <T>(root: string, fn: () => T) => withLock(notesPath(root), fn);
 
+/** `<private>...</private>` sections are dropped before a note is saved, like secrets that must never reach notes.json. */
+const unprivate = (s = "") => s.replace(/<private>[\s\S]*?(?:<\/private>|$)/gi, "").trim();
+
 function build(id: number, input: NoteInput): Note {
   if (!KINDS.includes(input.kind as NoteKind)) throw new Error(`kind must be one of: ${KINDS.join(", ")}`);
-  if (!input.title?.trim()) throw new Error("title is required");
+  const title = unprivate(input.title);
+  if (!title) throw new Error("title is required");
   return {
     id,
     kind: input.kind as NoteKind,
-    title: input.title.trim(),
-    body: input.body?.trim() ?? "",
+    title,
+    body: unprivate(input.body),
     paths: (input.paths ?? []).map(normalizePath).filter(Boolean),
     date: new Date().toISOString().slice(0, 10),
   };
